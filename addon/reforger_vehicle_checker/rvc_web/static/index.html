@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Reforger Vehicle Checker</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <div><small>LOCAL VEHICLE PIPELINE</small><h1>Reforger Vehicle Checker</h1></div>
+    <div id="status">Checking services...</div>
+  </header>
+  <section class="card">
+    <h2>Vehicle Project</h2>
+    <div class="grid">
+      <label>Addon root<input id="addon_root"></label>
+      <label>Asset name<input id="asset_name" value="ExampleVehicle"></label>
+      <label>Output directory<input id="output_directory"></label>
+      <label>Source blend<input id="source_blend"></label>
+      <label>Imported XOB resource<input id="imported_xob_resource" placeholder="{GUID}Assets/.../Vehicle.xob"></label>
+      <label>External wheel prefab<input id="external_wheel_prefab" value="{02CBBCB9922CA006}Prefabs/Vehicles/Wheeled/SampleCar_01/VehParts/SampleCar_01_wheel.et"></label>
+      <label>Template<select id="template"><option>Explorer</option><option>SampleCar</option></select></label>
+      <label>Legacy alias<input id="legacy_alias" placeholder="Optional old prefab filename"></label>
+    </div>
+    <div class="actions"><button id="check">Check</button><button id="generate">Generate Sources</button></div>
+  </section>
+  <section class="card">
+    <h2>Measurements &amp; Features</h2>
+    <p>These drive the generated RigidBody mass/centre-of-mass, axle wheel radius, and inertia. Enter real values for the actual vehicle (defaults are a mid-size car).</p>
+    <div class="grid">
+      <label>Wheelbase (m)<input id="wheelbase" type="number" step="0.01" min="0" value="3.0"></label>
+      <label>Wheel radius (m)<input id="wheel_radius" type="number" step="0.01" min="0" value="0.4"></label>
+      <label>Track (m)<input id="track" type="number" step="0.01" min="0" value="2.0"></label>
+      <label>Body height (m)<input id="body_height" type="number" step="0.01" min="0" value="1.8"></label>
+      <label>Mass (kg)<input id="mass" type="number" step="1" min="0" value="1800"></label>
+    </div>
+    <div class="grid">
+      <label class="chk"><input id="feat_doors" type="checkbox" checked> Doors</label>
+      <label class="chk"><input id="feat_glass" type="checkbox" checked> Glass</label>
+      <label class="chk"><input id="feat_lights" type="checkbox" checked> Lights</label>
+      <label class="chk"><input id="feat_emergency_lights" type="checkbox"> Emergency lights</label>
+      <label class="chk"><input id="feat_animations" type="checkbox" checked> Animations</label>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Two-endpoint animation setup</h2>
+    <p>Steering uses a left-extreme and right-extreme frame. Throttle uses released and pressed frames. Enfusion drives phase between those endpoints through the generated ASI mapping.</p>
+  </section>
+  <section class="card"><h2>Report</h2><pre id="report">No report yet.</pre></section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

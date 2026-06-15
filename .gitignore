@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.blend
+*.blend1
+*.fbx
+*.xob
+*.edds
+vehicle_check_report.json
+dist/*.zip
+!dist/.gitkeep
