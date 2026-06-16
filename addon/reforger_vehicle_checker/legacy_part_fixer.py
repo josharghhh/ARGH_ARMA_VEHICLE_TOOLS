@@ -19,7 +19,7 @@ Panel: View3D sidebar (N) -> "Part Fixer" tab.
 bl_info = {
     "name": "Reforger Part Fixer",
     "author": "ARGH Vehicle Tools contributors",
-    "version": (0, 8, 6),
+    "version": (0, 8, 7),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Part Fixer",
     "description": "Assign, review (test-open doors) and finalize vehicle parts for Enfusion rigging",
@@ -31,6 +31,25 @@ import bmesh
 import time
 from collections import Counter
 from mathutils import Vector, Matrix
+
+try:
+    from .rvc_core.rig_roles import (
+        SAMPLECAR_PARENT,
+        is_road_wheel_name,
+        is_steering_name,
+        opposite_bone_name,
+        resolve_target_bone,
+        target_bone_for_role,
+    )
+except Exception:
+    from rvc_core.rig_roles import (
+        SAMPLECAR_PARENT,
+        is_road_wheel_name,
+        is_steering_name,
+        opposite_bone_name,
+        resolve_target_bone,
+        target_bone_for_role,
+    )
 
 # ----------------------------------------------------------------------------
 # configuration
@@ -47,6 +66,8 @@ PART_ORDER = [
     "door_FL", "door_FR", "door_RL", "door_RR", "door_trunk",
     "window_FL", "window_FR", "window_RL", "window_RR", "window_trunk",
     "wheel_FL", "wheel_FR", "wheel_RL", "wheel_RR",
+    "rotator_FL", "rotator_FR", "rotator_RL", "rotator_RR",
+    "suspension_FL", "suspension_FR", "suspension_RL", "suspension_RR",
     "brake_FL", "brake_FR", "brake_RL", "brake_RR",
     "Steering_Wheel", "Pedal_Brake", "Pedal_Accelerator",
     "lights_front", "lights_rear", "lights_emergency",
@@ -66,6 +87,8 @@ COLL_COLORS = {
     "window_FL": 'COLOR_05', "window_FR": 'COLOR_05', "window_RL": 'COLOR_05', "window_RR": 'COLOR_05',
     "windows_body": 'COLOR_05',
     "wheel_FL": 'COLOR_02', "wheel_FR": 'COLOR_02', "wheel_RL": 'COLOR_02', "wheel_RR": 'COLOR_02',
+    "rotator_FL": 'COLOR_03', "rotator_FR": 'COLOR_03', "rotator_RL": 'COLOR_03', "rotator_RR": 'COLOR_03',
+    "suspension_FL": 'COLOR_06', "suspension_FR": 'COLOR_06', "suspension_RL": 'COLOR_06', "suspension_RR": 'COLOR_06',
     "brake_FL": 'COLOR_03', "brake_FR": 'COLOR_03', "brake_RL": 'COLOR_03', "brake_RR": 'COLOR_03',
     "Steering_Wheel": 'COLOR_06', "Pedal_Brake": 'COLOR_06', "Pedal_Accelerator": 'COLOR_06',
     "lights_front": 'COLOR_04', "lights_rear": 'COLOR_04', "lights_emergency": 'COLOR_04',
@@ -73,6 +96,34 @@ COLL_COLORS = {
 }
 
 PFX = "Police_Interceptor_SUV"
+
+VEHICLE_GAMEMAT = "{CE9253778DD8FBDE}Common/Materials/Game/metal.gamemat"
+TIRE_GAMEMAT = "{8F1BCCA995D7FA4B}Common/Materials/Game/rubber_tire.gamemat"
+TIRE_4MM_GAMEMAT = "{C2BF4F9689827271}Common/Materials/Game/RubberTire/rubber_tire_4mm_min.gamemat"
+FIREGEO_METAL_GAMEMAT = "{EDB153DC99889624}Common/Materials/Game/Metal/metal_3mm.gamemat"
+WHEEL_METAL_GAMEMAT = "{1950188BB10D20EA}Common/Materials/Game/Metal/metal_5mm.gamemat"
+LIGHT_PLASTIC_GAMEMAT = "{C17486F3DA1510F6}Common/Materials/Game/Plastic/plastic_3mm.gamemat"
+THIN_GLASS_GAMEMAT = "{8D1F0255D835F302}Common/Materials/Game/Glass/glass_2mm_min.gamemat"
+FABRIC_GAMEMAT = "{5EE22D6E62DCE04A}Common/Materials/Game/Fabric/fabric_6mm_min.gamemat"
+LAMINATED_GLASS_GAMEMAT = "{9CF9352E79A84A2A}Common/Materials/Game/Glass/glass_laminated_4mm.gamemat"
+ARMORED_GLASS_GAMEMAT = "{7BE37DA4E6BA2358}Common/Materials/Game/GlassArmored/glass_armored_10mm.gamemat"
+COMPONENT_GAMEMATS = {
+    "Battery": "{5D38201F93B9DE65}Common/Materials/Game/VehicleParts/vehicle_battery.gamemat",
+    "Engine": "{0B9EB7B9C8DCC6A5}Common/Materials/Game/VehicleParts/engine.gamemat",
+    "FuelTank": "{2E934203697527B6}Common/Materials/Game/VehicleParts/fuel_tank.gamemat",
+    "Gearbox": "{427C6C77966E41CB}Common/Materials/Game/VehicleParts/differential.gamemat",
+}
+ENFUSION_LAYER_COLORS = {
+    "Vehicle": (1.0, 0.42, 0.0, 0.62),
+    "FireGeo": (1.0, 0.05, 0.0, 0.72),
+    "GlassFire": (0.0, 0.65, 1.0, 0.62),
+    "MineTrigger": (0.15, 1.0, 0.1, 0.58),
+    "VehicleComplex": (1.0, 0.72, 0.05, 0.62),
+}
+ENFUSION_LAYER_COLORS_IDLE = {
+    key: (value[0], value[1], value[2], min(value[3], 0.42))
+    for key, value in ENFUSION_LAYER_COLORS.items()
+}
 
 # session-verified seeds (object name suffixes of the original asset)
 SEED = {
@@ -419,13 +470,101 @@ def _collider_usage(name):
     """Match the stock Enfusion layer preset implied by a collider name."""
     if name.startswith("UCL_MT_"):
         return "MineTrigger"
+    if name.startswith("UCL_VC_"):
+        return "VehicleComplex"
     if name.startswith("UCX_MainCol_"):
         return "Vehicle"
-    if name.startswith("UTM_Glass"):
+    if name.startswith("UTM_VC_"):
+        return "VehicleComplex"
+    if name.startswith("UTM_GlassFire") or name == "UTM_Detail_Glass":
         return "GlassFire"
+    if name.startswith("UTM_Glass"):
+        return "FireGeo"
     if name.startswith(("UCX_FG_", "UTM_")):
         return "FireGeo"
     return "Vehicle"
+
+
+def _name_has_any(name, tokens):
+    lower = name.lower()
+    return any(token in lower for token in tokens)
+
+
+def _detail_surface_properties(name, default_metal):
+    if _name_has_any(name, ("rubber", "tire", "tyre")):
+        return [TIRE_4MM_GAMEMAT]
+    if _name_has_any(name, ("glass", "window", "windscreen", "windshield", "lamp",
+                           "lamps", "light", "led", "indicator", "blinker", "amber",
+                           "mirror")):
+        return [THIN_GLASS_GAMEMAT]
+    if _name_has_any(name, ("plastic", "panel", "trim", "bumper", "fender_flare", "grille")):
+        return [LIGHT_PLASTIC_GAMEMAT]
+    if _name_has_any(name, ("fabric", "cloth", "carpet", "leather", "seat")):
+        return [FABRIC_GAMEMAT]
+    return [default_metal]
+
+
+def _vehicle_surface_properties(name, armored_body=False):
+    """SampleCar-style stock gamemat policy for generated vehicle colliders."""
+    if name.startswith("UCL_MT_"):
+        return [TIRE_GAMEMAT]
+    if name.startswith("UCL_VC_"):
+        return [TIRE_4MM_GAMEMAT]
+    if name.startswith("UTM_VC_"):
+        return _detail_surface_properties(name, WHEEL_METAL_GAMEMAT)
+    if name.startswith(("UCX_MainCol_", "UBX_MainCol_")):
+        return [VEHICLE_GAMEMAT]
+    if name.startswith("UTM_FG_Wheel") and _name_has_any(name, ("tire", "tyre", "rubber")):
+        return [TIRE_4MM_GAMEMAT]
+    if name.startswith("UTM_FG_Wheel") and _name_has_any(name, ("rim", "hub", "middle", "metal", "inner")):
+        return [WHEEL_METAL_GAMEMAT]
+    if name.startswith("UTM_FG_Wheel"):
+        return [TIRE_4MM_GAMEMAT, WHEEL_METAL_GAMEMAT]
+    for component, resource in COMPONENT_GAMEMATS.items():
+        if name in (f"UCX_FG_{component}", f"UTM_FG_{component}"):
+            return [resource]
+    if name.startswith(("UTM_FG_Light", "UCX_FG_Light")):
+        return [LIGHT_PLASTIC_GAMEMAT]
+    if name.startswith("UTM_Glass") or name == "UTM_Detail_Glass":
+        return [ARMORED_GLASS_GAMEMAT if armored_body else LAMINATED_GLASS_GAMEMAT]
+    if name.startswith(("UCX_FG_", "UTM_")):
+        return _detail_surface_properties(name, FIREGEO_METAL_GAMEMAT)
+    return []
+
+
+def _gamemat_material(resource):
+    from pathlib import PurePosixPath
+    guid = resource[1:17] if resource.startswith("{") else ""
+    path = resource.split("}", 1)[-1] if "}" in resource else resource
+    stem = PurePosixPath(path).stem
+    name = f"{stem}_{guid}"[:64] if guid else stem[:64]
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+        material.diffuse_color = (0.95, 0.55, 0.08, 0.55)
+    material["rpf_gamemat"] = resource
+    material["ebt_resource_name"] = resource
+    try:
+        material.ebt_resource_name = resource
+    except Exception:
+        pass
+    return material
+
+
+def _apply_vehicle_collision_materials(obj, armored_body=False):
+    usage = _collider_usage(obj.name)
+    resources = _vehicle_surface_properties(obj.name, armored_body)
+    _place_ebt_collider(obj, usage)
+    obj["usage"] = usage
+    obj["rpf_surface_properties"] = "|".join(resources)
+    if not resources:
+        return usage, []
+    obj.data.materials.clear()
+    for resource in resources:
+        obj.data.materials.append(_gamemat_material(resource))
+    for polygon in obj.data.polygons:
+        polygon.material_index = min(polygon.material_index, len(resources) - 1)
+    return usage, resources
 
 
 def _place_ebt_collider(obj, usage=None):
@@ -451,13 +590,7 @@ def _place_ebt_collider(obj, usage=None):
         collection.objects.unlink(obj)
     layer.objects.link(obj)
     obj["usage"] = usage
-    colors = {
-        "Vehicle": (1.0, 0.22, 0.03, 0.32),
-        "FireGeo": (1.0, 0.03, 0.03, 0.50),
-        "GlassFire": (0.0, 0.65, 1.0, 0.45),
-        "MineTrigger": (0.1, 1.0, 0.15, 0.45),
-    }
-    obj.color = colors.get(usage, (1.0, 0.5, 0.0, 0.4))
+    obj.color = ENFUSION_LAYER_COLORS_IDLE.get(usage, (1.0, 0.5, 0.0, 0.4))
     visual_review = bpy.context.scene.get("rpf_collider_visual_review", False)
     is_main_hull = obj.name.startswith(("UCX_MainCol_", "UBX_MainCol_"))
     obj.display_type = 'SOLID' if visual_review and is_main_hull else 'WIRE'
@@ -498,6 +631,71 @@ def _remove_glass_faces(obj):
         obj.data.materials.pop(index=index)
     obj.data.update()
     return len(faces)
+
+
+GLASS_FACE_MAT_TOKENS = (
+    "glass", "window", "windscreen", "windshield", "clear", "transparent",
+    "translucent", "lens",
+)
+
+
+def _material_index_has_tokens(obj, material_index, tokens):
+    if material_index < 0 or material_index >= len(obj.data.materials):
+        return False
+    material = obj.data.materials[material_index]
+    name = material.name.lower() if material else ""
+    return any(token in name for token in tokens)
+
+
+def _copy_face_subset(obj, name, tokens, *, side=None, include_matching=True):
+    """Copy only matching material faces from one mesh, preserving UV/custom data.
+
+    `side` is vehicle local/world X side: "L" keeps x < 0, "R" keeps x >= 0.
+    If the object itself is named as glass/window but materials are generic, the
+    object name is accepted as the match source so finalized mixed parts still
+    produce DST panes.
+    """
+    if not obj or obj.type != 'MESH' or not obj.data.polygons:
+        return None
+    object_is_glass = _is_glass_part(obj.name) or _is_glass_part(part_of(obj) or "")
+    mesh = obj.data.copy()
+    copy = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(copy)
+    copy.matrix_world = obj.matrix_world.copy()
+    for vertex_group in list(copy.vertex_groups):
+        copy.vertex_groups.remove(vertex_group)
+    for modifier in list(copy.modifiers):
+        copy.modifiers.remove(modifier)
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    keep = []
+    for face in bm.faces:
+        match = _material_index_has_tokens(obj, face.material_index, tokens) or object_is_glass
+        if include_matching != match:
+            continue
+        if side:
+            center = obj.matrix_world @ face.calc_center_median()
+            if side == "L" and center.x >= 0:
+                continue
+            if side == "R" and center.x < 0:
+                continue
+        keep.append(face)
+    if not keep:
+        bm.free()
+        bpy.data.objects.remove(copy, do_unlink=True)
+        return None
+    delete = [face for face in bm.faces if face not in keep]
+    if delete:
+        bmesh.ops.delete(bm, geom=delete, context='FACES')
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+    if not mesh.polygons:
+        bpy.data.objects.remove(copy, do_unlink=True)
+        return None
+    return copy
 
 
 def _box(name, mn, mx):
@@ -676,6 +874,66 @@ def _part_convex_hull(source, name, max_faces):
         modifier.use_bone_envelopes = False
         obj["rpf_ucx_bone"] = rigid_groups[0]
     return _place_ebt_collider(obj, "Vehicle")
+
+
+def _selected_face_temp_objects(context, split_loose=True):
+    """Copy Edit Mode selected faces into temporary world-space mesh objects.
+
+    This deliberately mirrors the manual workflow that works well on vehicles:
+    select a curved/hard-edged shell area, separate that region, then convexify it.
+    The original mesh is not modified.
+    """
+    source = context.edit_object
+    if not source or source.type != 'MESH' or context.mode != 'EDIT_MESH':
+        return [], None
+    bm = bmesh.from_edit_mesh(source.data)
+    selected = [face for face in bm.faces if face.select]
+    if not selected:
+        return [], source
+    islands = []
+    if split_loose:
+        remaining = set(selected)
+        while remaining:
+            seed = remaining.pop()
+            stack = [seed]
+            island = [seed]
+            while stack:
+                face = stack.pop()
+                for edge in face.edges:
+                    for other in edge.link_faces:
+                        if other in remaining:
+                            remaining.remove(other)
+                            stack.append(other)
+                            island.append(other)
+            islands.append(island)
+    else:
+        islands = [selected]
+
+    made = []
+    for idx, faces in enumerate(islands, 1):
+        vert_map = {}
+        verts = []
+        out_faces = []
+        for face in faces:
+            indices = []
+            for vert in face.verts:
+                if vert not in vert_map:
+                    vert_map[vert] = len(verts)
+                    verts.append(tuple(source.matrix_world @ vert.co))
+                indices.append(vert_map[vert])
+            if len(indices) >= 3:
+                out_faces.append(indices)
+        if len(verts) < 4 or not out_faces:
+            continue
+        mesh = bpy.data.meshes.new(f"_rpf_selected_faces_{idx:02d}")
+        mesh.from_pydata(verts, [], out_faces)
+        mesh.update(calc_edges=True)
+        obj = bpy.data.objects.new(mesh.name, mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        obj["rpf_temp_selected_faces"] = True
+        obj["rpf_source_object"] = source.name
+        made.append(obj)
+    return made, source
 
 
 def _mesh_is_convex(obj, tolerance=0.0005):
@@ -894,15 +1152,27 @@ class RPF_OT_selected_parts_to_ucx(bpy.types.Operator):
 
     replace_generated: bpy.props.BoolProperty(
         name="Replace Previous Generated Hulls",
-        default=True,
+        default=False,
         description="Remove prior selected-part UCX hulls generated by this tool",
     )
 
     def execute(self, context):
-        sources = [
-            obj for obj in context.selected_objects
-            if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
-        ]
+        temp_sources = []
+        edit_source = None
+        if context.mode == 'EDIT_MESH':
+            temp_sources, edit_source = _selected_face_temp_objects(context, True)
+            if not temp_sources:
+                self.report({'ERROR'}, "Select faces first, or switch to Object Mode for whole-part convex")
+                return {'CANCELLED'}
+            bpy.ops.object.mode_set(mode='OBJECT')
+            sources = temp_sources
+        else:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            sources = [
+                obj for obj in context.selected_objects
+                if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
+            ]
         if not sources:
             self.report({'ERROR'}, "Select one or more render-part meshes")
             return {'CANCELLED'}
@@ -916,14 +1186,23 @@ class RPF_OT_selected_parts_to_ucx(bpy.types.Operator):
         made = []
         skipped = []
         index = _next_main_col_index()
-        for source in sources:
-            name = f"UCX_MainCol_{index:02d}_{_safe_name_token(source.name)}"
+        for source_i, source in enumerate(sources, 1):
+            source_name = edit_source.name if edit_source else source.name
+            suffix = f"_sel{source_i:02d}" if edit_source else ""
+            name = f"UCX_MainCol_{index:02d}_{_safe_name_token(source_name)}{suffix}"
             hull = _part_convex_hull(source, name, self.max_faces)
             if hull is None:
-                skipped.append(source.name)
+                skipped.append(source_name)
                 continue
+            if edit_source:
+                hull["rpf_ucx_source"] = edit_source.name
+                hull["rpf_ucx_selection_source"] = edit_source.name
             made.append(hull)
             index += 1
+
+        for temp in temp_sources:
+            if temp.name in bpy.data.objects:
+                bpy.data.objects.remove(temp, do_unlink=True)
 
         bpy.ops.object.select_all(action='DESELECT')
         for obj in made:
@@ -938,6 +1217,502 @@ class RPF_OT_selected_parts_to_ucx(bpy.types.Operator):
             + (f"; skipped {len(skipped)}" if skipped else ""),
         )
         return {'FINISHED'} if made else {'CANCELLED'}
+
+
+def _vhacd_props_from_scene(scene):
+    return {
+        "max_hulls": scene.rpf_ucx_max_hulls,
+        "resolution": scene.rpf_vhacd_resolution,
+        "volume_error": scene.rpf_vhacd_volume_error,
+        "recursion_depth": scene.rpf_vhacd_recursion_depth,
+        "shrink_wrap": scene.rpf_vhacd_shrinkwrap,
+        "fill_mode": scene.rpf_vhacd_fill_mode,
+        "max_vertices": scene.rpf_vhacd_max_vertices,
+        "min_edge_length": scene.rpf_vhacd_min_edge_length,
+        "split_hulls": scene.rpf_vhacd_split_hulls,
+        "pre_scale": scene.rpf_vhacd_pre_scale,
+    }
+
+
+class RPF_OT_selected_faces_to_ucx(bpy.types.Operator):
+    bl_idname = "rpf.selected_faces_to_ucx"
+    bl_label = "Edit Selection -> UCX"
+    bl_description = ("Edit Mode workflow: select vehicle shell faces, then create "
+                      "controlled convex UCX_MainCol hulls from only that region. "
+                      "Split selected loose islands to follow curves and hard edges")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    use_decomposition: bpy.props.BoolProperty(name="Use decomposition", default=True)
+    split_loose: bpy.props.BoolProperty(name="Split loose islands", default=True)
+    replace_generated: bpy.props.BoolProperty(name="Replace prior selection hulls", default=False)
+
+    def execute(self, context):
+        if context.mode != 'EDIT_MESH':
+            self.report({'ERROR'}, "Enter Edit Mode and select faces on the vehicle shell")
+            return {'CANCELLED'}
+        temp_objects, source = _selected_face_temp_objects(context, self.split_loose)
+        if not temp_objects:
+            self.report({'ERROR'}, "No selected faces found")
+            return {'CANCELLED'}
+        checkpoint("pre_selected_faces_ucx")
+        if self.replace_generated:
+            for obj in list(bpy.data.objects):
+                if obj.get("rpf_ucx_selection_source"):
+                    bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        made = []
+        backend_used = "convex-fallback"
+        index = _next_main_col_index()
+        props = _vhacd_props_from_scene(context.scene)
+        exe = context.scene.rpf_vhacd_exe
+        backend = context.scene.rpf_ucx_backend
+        for region_idx, temp in enumerate(temp_objects, 1):
+            verts, faces = _world_tris(temp)
+            verts, faces = _reduce_mesh(verts, faces, context.scene.rpf_ucx_decimate)
+            hulls = None
+            if _too_dense_for_decomposition(len(faces), context.scene.rpf_ucx_decimate):
+                backend_used = "convex-fallback:dense-open-input"
+                print(
+                    f"RPF V-HACD: selected face region still has {len(faces)} tris; using capped convex fallback",
+                    flush=True,
+                )
+            elif self.use_decomposition and backend != 'FALLBACK':
+                backend_used, hulls = _decompose_hulls(
+                    verts,
+                    faces,
+                    context.scene.rpf_ucx_concavity,
+                    exe,
+                    backend,
+                    props,
+                )
+            token = _safe_name_token(source.name if source else "selection")
+            if not hulls:
+                obj = _capped_hull_obj(
+                    f"UCX_MainCol_{index:02d}_{token}_sel{region_idx:02d}",
+                    verts,
+                    context.scene.rpf_ucx_max_faces,
+                )
+                if obj:
+                    obj["rpf_ucx_source"] = source.name if source else ""
+                    obj["rpf_ucx_selection_source"] = source.name if source else ""
+                    obj["rpf_ucx_face_cap"] = context.scene.rpf_ucx_max_faces
+                    _place_ebt_collider(obj, "Vehicle")
+                    _apply_vehicle_collision_materials(obj)
+                    made.append(obj)
+                    index += 1
+                continue
+            selected_hulls = _select_representative_hulls(
+                hulls,
+                context.scene.rpf_ucx_max_hulls,
+                f"{token}_selected_faces",
+            )
+            for hull_idx, points in enumerate(selected_hulls):
+                obj = _capped_hull_obj(
+                    f"UCX_MainCol_{index:02d}_{token}_sel{region_idx:02d}_{hull_idx:02d}",
+                    points,
+                    context.scene.rpf_ucx_max_faces,
+                )
+                if not obj:
+                    continue
+                obj["rpf_ucx_source"] = source.name if source else ""
+                obj["rpf_ucx_selection_source"] = source.name if source else ""
+                obj["rpf_ucx_face_cap"] = context.scene.rpf_ucx_max_faces
+                _place_ebt_collider(obj, "Vehicle")
+                _apply_vehicle_collision_materials(obj)
+                made.append(obj)
+                index += 1
+        for temp in temp_objects:
+            bpy.data.objects.remove(temp, do_unlink=True)
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in made:
+            obj.select_set(True)
+            obj.display_type = 'SOLID'
+            obj.show_in_front = True
+        if made:
+            context.view_layer.objects.active = made[0]
+        self.report(
+            {'INFO'} if made else {'ERROR'},
+            f"{backend_used}: {len(made)} UCX hulls from selected faces",
+        )
+        return {'FINISHED'} if made else {'CANCELLED'}
+
+
+class RPF_OT_apply_collision_materials(bpy.types.Operator):
+    bl_idname = "rpf.apply_collision_materials"
+    bl_label = "Fix Layer + Gamemats"
+    bl_description = ("Apply SampleCar vehicle layer presets and stock gamemat material "
+                      "slots to selected colliders, or every collider if none selected")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    selected_only: bpy.props.BoolProperty(name="Selected only", default=False)
+    armored_body: bpy.props.BoolProperty(name="Armored body/glass", default=False)
+
+    def execute(self, context):
+        selected = [obj for obj in context.selected_objects
+                    if obj.type == 'MESH' and obj.name.startswith(COLLISION_PFX)]
+        targets = selected if (self.selected_only or selected) else _collision_objects()
+        if not targets:
+            self.report({'ERROR'}, "No collision objects found")
+            return {'CANCELLED'}
+        fixed = []
+        missing = []
+        for obj in targets:
+            usage, resources = _apply_vehicle_collision_materials(obj, self.armored_body)
+            fixed.append((obj.name, usage, len(resources)))
+            if not resources:
+                missing.append(obj.name)
+        print("RPF COLLISION MATERIALS:",
+              [{"name": name, "usage": usage, "surfaces": count}
+               for name, usage, count in fixed])
+        msg = f"fixed {len(fixed)} collider layer/material assignments"
+        if missing:
+            msg += f"; {len(missing)} had no gamemat rule"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+def _object_tri_count(obj):
+    if obj.type != 'MESH':
+        return 0
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    return len(mesh.loop_triangles)
+
+
+def _mesh_boundary_ratio(obj):
+    """Approximate openness from boundary edges. Open shells need safer settings."""
+    if obj.type != 'MESH' or not obj.data.polygons:
+        return 0.0
+    counts = {}
+    for poly in obj.data.polygons:
+        verts = list(poly.vertices)
+        for a, b in zip(verts, verts[1:] + verts[:1]):
+            key = tuple(sorted((a, b)))
+            counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return 0.0
+    boundary = sum(1 for count in counts.values() if count == 1)
+    return boundary / max(len(counts), 1)
+
+
+def _bbox_span_for_objects(objects):
+    mn = Vector((1e9, 1e9, 1e9))
+    mx = Vector((-1e9, -1e9, -1e9))
+    for obj in objects:
+        a, b = wbbox(obj)
+        mn.x = min(mn.x, a.x); mn.y = min(mn.y, a.y); mn.z = min(mn.z, a.z)
+        mx.x = max(mx.x, b.x); mx.y = max(mx.y, b.y); mx.z = max(mx.z, b.z)
+    return mx - mn
+
+
+class RPF_OT_autotune_collision_settings(bpy.types.Operator):
+    bl_idname = "rpf.autotune_collision_settings"
+    bl_label = "Auto Tune From Mesh"
+    bl_description = ("Read selected mesh/parts and set VHACD/CoACD controls for that "
+                      "input. Full open body shells get broader stable settings; small "
+                      "selected panels get tighter settings")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    scope: bpy.props.EnumProperty(
+        name="Scope",
+        default='SELECTED',
+        items=[
+            ('SELECTED', "Selected", "Tune from selected render meshes"),
+            ('VISIBLE', "Visible", "Tune from visible render meshes if nothing is selected"),
+        ],
+    )
+
+    def execute(self, context):
+        selected = [
+            obj for obj in context.selected_objects
+            if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
+        ]
+        if selected:
+            sources = selected
+            source_label = "selected"
+        else:
+            sources = [
+                obj for obj in context.scene.objects
+                if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
+                and not obj.hide_get()
+            ]
+            source_label = "visible"
+        if not sources:
+            self.report({'ERROR'}, "Select render mesh parts first, or show the render mesh")
+            return {'CANCELLED'}
+
+        tri_count = sum(_object_tri_count(obj) for obj in sources)
+        open_ratio = max((_mesh_boundary_ratio(obj) for obj in sources), default=0.0)
+        span = _bbox_span_for_objects(sources)
+        max_dim = max(span.x, span.y, span.z, 0.001)
+        volume = max(span.x, 0.001) * max(span.y, 0.001) * max(span.z, 0.001)
+        text = " ".join(_object_semantic_text(obj) for obj in sources)
+        small_region = len(sources) <= 2 and max_dim < 2.2 and tri_count < 35000
+        detail_surface = (
+            _is_glass_part(text) or _is_light_part(text) or _is_wheel_part(text)
+            or any(token in text for token in ("seat", "interior", "carpet", "belt"))
+        )
+
+        sc = context.scene
+        sc.rpf_ucx_backend = 'AUTO'
+        sc.rpf_ucx_max_faces = 200
+        sc.rpf_vhacd_pre_scale = 1.0
+        sc.rpf_vhacd_shrinkwrap = True
+        sc.rpf_vhacd_fill_mode = 'flood'
+        sc.rpf_vhacd_min_edge_length = 2
+        sc.rpf_vhacd_volume_error = 1.0
+
+        if detail_surface:
+            sc.rpf_ucx_max_hulls = 12
+            sc.rpf_ucx_decimate = min(2500, max(800, tri_count // 8 or 800))
+            sc.rpf_ucx_concavity = 0.12
+            sc.rpf_vhacd_resolution = 60000
+            sc.rpf_vhacd_recursion_depth = 8
+            sc.rpf_vhacd_max_vertices = 48
+            sc.rpf_vhacd_split_hulls = False
+            advice = "detail surface: prefer Selected -> FireGeo/VehicleComplex over main UCX"
+        elif small_region:
+            sc.rpf_ucx_max_hulls = 18 if open_ratio > 0.08 else 12
+            sc.rpf_ucx_decimate = min(3000, max(1200, tri_count // 3 or 1200))
+            sc.rpf_ucx_concavity = 0.055 if open_ratio < 0.06 else 0.075
+            sc.rpf_vhacd_resolution = 120000
+            sc.rpf_vhacd_recursion_depth = 10
+            sc.rpf_vhacd_max_vertices = 64
+            sc.rpf_vhacd_split_hulls = True
+            advice = "small region: use Edit Faces -> UCX or V-HACD selected"
+        elif tri_count > 60000 or open_ratio > 0.08 or volume > 6.0:
+            sc.rpf_ucx_max_hulls = 48
+            sc.rpf_ucx_decimate = 3500
+            sc.rpf_ucx_concavity = 0.09
+            sc.rpf_vhacd_resolution = 90000
+            sc.rpf_vhacd_recursion_depth = 10
+            sc.rpf_vhacd_max_vertices = 64
+            sc.rpf_vhacd_split_hulls = False
+            advice = "large/open shell: broad pass only, then refine by selected regions"
+        else:
+            sc.rpf_ucx_max_hulls = 32
+            sc.rpf_ucx_decimate = 4000
+            sc.rpf_ucx_concavity = 0.075
+            sc.rpf_vhacd_resolution = 100000
+            sc.rpf_vhacd_recursion_depth = 10
+            sc.rpf_vhacd_max_vertices = 64
+            sc.rpf_vhacd_split_hulls = True
+            advice = "medium body part: selected V-HACD is appropriate"
+
+        sc["rpf_autotune_summary"] = (
+            f"{source_label}: {len(sources)} mesh(es), {tri_count:,} tris, "
+            f"open {open_ratio:.2f}, span {[round(v, 2) for v in span]} -> {advice}"
+        )
+        print("RPF AUTO TUNE:", sc["rpf_autotune_summary"])
+        self.report({'INFO'}, sc["rpf_autotune_summary"][:240])
+        return {'FINISHED'}
+
+
+def _join_bare_copies(objs, name):
+    """Bare-copy (no vgroups/modifiers) and join a list of meshes into one object."""
+    copies = []
+    for o in objs:
+        c = bpy.data.objects.new(f"_jbc_{o.name}", o.data.copy())
+        bpy.context.scene.collection.objects.link(c)
+        c.matrix_world = o.matrix_world.copy()
+        for vg in list(c.vertex_groups):
+            c.vertex_groups.remove(vg)
+        for m in list(c.modifiers):
+            c.modifiers.remove(m)
+        copies.append(c)
+    if not copies:
+        return None
+    bpy.ops.object.select_all(action='DESELECT')
+    for c in copies:
+        c.select_set(True)
+    bpy.context.view_layer.objects.active = copies[0]
+    if len(copies) > 1:
+        bpy.ops.object.join()
+    joined = bpy.context.view_layer.objects.active
+    joined.name = name
+    return joined
+
+
+class RPF_OT_selected_to_direct_collision(bpy.types.Operator):
+    bl_idname = "rpf.selected_to_direct_collision"
+    bl_label = "Selected -> Direct Collision Copy"
+    bl_description = ("Duplicate selected render meshes as exact-position Enfusion "
+                      "collision/detail geometry. Best for FireGeo, DST glass, light "
+                      "covers, and wheel/detail hit surfaces. Main Vehicle physics "
+                      "should still use convex UCX hulls")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: bpy.props.EnumProperty(
+        name="Target Layer",
+        default='FIREGEO',
+        items=[
+            ('UCXVEHICLE', "UCX Vehicle", "Copy selected surfaces to UCX_MainCol_* on Vehicle; validate/convexify before export"),
+            ('FIREGEO', "FireGeo", "Copy selected surfaces to UTM_FG_* on FireGeo"),
+            ('GLASSFIRE', "GlassFire", "Copy selected surfaces to UTM_GlassFire_* on GlassFire"),
+            ('VEHICLECOMPLEX', "VehicleComplex", "Copy selected surfaces to UTM_VC_* on VehicleComplex"),
+        ],
+    )
+    decimate_ratio: bpy.props.FloatProperty(
+        name="Decimate Ratio",
+        default=1.0,
+        min=0.01,
+        max=1.0,
+        precision=3,
+        description="1.0 keeps the selected mesh exactly; lower values reduce FireGeo/detail cost",
+    )
+    merge_selected: bpy.props.BoolProperty(
+        name="Merge Selected",
+        default=False,
+        description="Join all selected copies into one collider object instead of one per source mesh",
+    )
+    replace_previous: bpy.props.BoolProperty(
+        name="Replace Previous Direct Copies",
+        default=False,
+        description="Remove prior colliders made by this exact-copy tool before creating new ones",
+    )
+
+    def _target(self):
+        if self.mode == 'UCXVEHICLE':
+            return "Vehicle", "UCX_MainCol"
+        if self.mode == 'GLASSFIRE':
+            return "GlassFire", "UTM_GlassFire"
+        if self.mode == 'VEHICLECOMPLEX':
+            return "VehicleComplex", "UTM_VC"
+        return "FireGeo", "UTM_FG"
+
+    def _copy_name(self, prefix, source, index, base_ucx_index):
+        token = _safe_name_token(source.get("rpf_source_object", source.name))
+        if self.mode == 'UCXVEHICLE':
+            return f"{prefix}_{base_ucx_index + index - 1:02d}_{token}_copy"
+        return f"{prefix}_{token}_{index:02d}"
+
+    def _copy_source(self, source, name):
+        obj = bpy.data.objects.new(name, source.data.copy())
+        bpy.context.scene.collection.objects.link(obj)
+        obj.matrix_world = source.matrix_world.copy()
+        for vg in list(obj.vertex_groups):
+            obj.vertex_groups.remove(vg)
+        for modifier in list(obj.modifiers):
+            obj.modifiers.remove(modifier)
+        if self.decimate_ratio < 0.999:
+            dec = obj.modifiers.new("RPF_DIRECT_COPY_DECIMATE", 'DECIMATE')
+            dec.ratio = self.decimate_ratio
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            try:
+                bpy.ops.object.modifier_apply(modifier=dec.name)
+            except RuntimeError:
+                obj.modifiers.remove(dec)
+        return obj
+
+    def execute(self, context):
+        temp_sources = []
+        if context.mode == 'EDIT_MESH':
+            temp_sources, _source = _selected_face_temp_objects(context, True)
+            if not temp_sources:
+                self.report({'ERROR'}, "Select faces first, or switch to Object Mode for whole-mesh copy")
+                return {'CANCELLED'}
+            bpy.ops.object.mode_set(mode='OBJECT')
+            sources = temp_sources
+        else:
+            sources = [
+                obj for obj in context.selected_objects
+                if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
+            ]
+        if not sources:
+            self.report({'ERROR'}, "Select one or more render meshes to duplicate as collision")
+            return {'CANCELLED'}
+        checkpoint("pre_direct_collision_copy")
+        if self.replace_previous:
+            for obj in list(bpy.data.objects):
+                if obj.get("rpf_direct_collision_copy"):
+                    bpy.data.objects.remove(obj, do_unlink=True)
+
+        # UCX vehicle physics colliders MUST be convex. Build guaranteed-convex,
+        # face-capped, outlier-rejected hulls from the selection (one per part, or a
+        # single hull when Merge Selected is on) so "Selected -> UCX" yields valid
+        # colliders directly instead of a non-convex raw copy.
+        if self.mode == 'UCXVEHICLE':
+            hull_sources, temp_merge = sources, None
+            if self.merge_selected and len(sources) > 1:
+                temp_merge = _join_bare_copies(sources, "UCX_copy_merge_src")
+                if temp_merge:
+                    hull_sources = [temp_merge]
+            made = []
+            idx = _next_main_col_index()
+            for src in hull_sources:
+                token = _safe_name_token(src.get("rpf_source_object", src.name))
+                hull = _part_convex_hull(src, f"UCX_MainCol_{idx:02d}_{token}_copy", 200)
+                if hull is None:
+                    continue
+                hull["rpf_direct_collision_copy"] = True
+                hull["rpf_collision_source"] = src.name
+                hull["rpf_collision_copy_mode"] = self.mode
+                _apply_vehicle_collision_materials(hull)
+                hull.display_type = 'SOLID'; hull.show_in_front = True
+                made.append(hull); idx += 1
+            if temp_merge and temp_merge.name in bpy.data.objects:
+                bpy.data.objects.remove(temp_merge, do_unlink=True)
+            for temp in temp_sources:
+                if temp.name in bpy.data.objects:
+                    bpy.data.objects.remove(temp, do_unlink=True)
+            bpy.ops.object.select_all(action='DESELECT')
+            for o in made:
+                o.select_set(True)
+            if made:
+                context.view_layer.objects.active = made[0]
+            faces = sum(len(o.data.polygons) for o in made)
+            self.report({'INFO'} if made else {'ERROR'},
+                        f"{len(made)} convex UCX collider(s), {faces:,} faces (<=200, validated convex)")
+            print("RPF UCX COPY:", [o.name for o in made])
+            return {'FINISHED'} if made else {'CANCELLED'}
+
+        usage, prefix = self._target()
+        base_ucx_index = _next_main_col_index()
+        copies = []
+        for index, source in enumerate(sources, 1):
+            name = self._copy_name(prefix, source, index, base_ucx_index)
+            copy = self._copy_source(source, name)
+            copy["rpf_direct_collision_copy"] = True
+            copy["rpf_collision_source"] = source.name
+            copy["rpf_collision_copy_mode"] = self.mode
+            copies.append(copy)
+        if self.merge_selected and len(copies) > 1:
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in copies:
+                obj.select_set(True)
+            context.view_layer.objects.active = copies[0]
+            bpy.ops.object.join()
+            merged = context.view_layer.objects.active
+            if self.mode == 'UCXVEHICLE':
+                merged.name = f"{prefix}_{base_ucx_index:02d}_Selected_{_safe_name_token(sources[0].name)}"
+            else:
+                merged.name = f"{prefix}_Selected_{_safe_name_token(sources[0].name)}"
+            merged["rpf_direct_collision_copy"] = True
+            merged["rpf_collision_source"] = ",".join(source.name for source in sources[:24])
+            merged["rpf_collision_copy_mode"] = self.mode
+            copies = [merged]
+        for temp in temp_sources:
+            if temp.name in bpy.data.objects:
+                bpy.data.objects.remove(temp, do_unlink=True)
+        for obj in copies:
+            _place_ebt_collider(obj, usage)
+            _apply_vehicle_collision_materials(obj)
+            obj.display_type = 'SOLID'
+            obj.show_wire = False
+            obj.show_all_edges = False
+            obj.show_in_front = True
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in copies:
+            obj.select_set(True)
+        context.view_layer.objects.active = copies[0]
+        faces = sum(len(obj.data.polygons) for obj in copies)
+        note = "; run Validate/Fix UCX before export" if self.mode == 'UCXVEHICLE' else ""
+        self.report({'INFO'}, f"{len(copies)} {usage} direct copy object(s), {faces:,} faces{note}")
+        print("RPF DIRECT COLLISION COPY:",
+              {"usage": usage, "objects": [obj.name for obj in copies], "faces": faces})
+        return {'FINISHED'}
 
 
 class RPF_OT_validate_ucx(bpy.types.Operator):
@@ -1039,8 +1814,13 @@ class RPF_OT_collision_view(bpy.types.Operator):
     mode: bpy.props.EnumProperty(
         items=[
             ('MODEL', "Model", "Render model only"),
-            ('UCX', "UCX", "Vehicle physics and MineTrigger with model"),
+            ('UCX', "UCX", "Vehicle physics with model"),
             ('FIRE', "FireGeo", "FireGeo and GlassFire with model"),
+            ('GLASS', "Glass", "Glass collision with model"),
+            ('WHEELS', "All Wheel", "All wheel VehicleComplex, MineTrigger and FireGeo collision with model"),
+            ('WHEEL_VC', "VehicleComplex", "All VehicleComplex collision, including UCL_VC wheel slots and UTM_VC detail copies"),
+            ('WHEEL_FG', "Wheel FireGeo", "Wheel FireGeo tire/rim hit geometry only"),
+            ('WHEEL_MT', "MineTrigger", "Wheel mine-trigger collision only"),
             ('ALL', "All", "All render and collision sections"),
         ],
         default='UCX',
@@ -1048,9 +1828,12 @@ class RPF_OT_collision_view(bpy.types.Operator):
 
     def execute(self, context):
         collider_prefixes = ("UCX_", "UBX_", "UCL_", "UTM_", "USP_", "UCS_")
+        wheel_modes = {'WHEELS', 'WHEEL_VC', 'WHEEL_FG', 'WHEEL_MT'}
+        solid_review_modes = {'UCX', 'FIRE', 'GLASS', 'WHEELS', 'WHEEL_VC', 'WHEEL_FG', 'WHEEL_MT', 'ALL'}
         for obj in bpy.data.objects:
             if obj.type != 'MESH':
                 continue
+            name = obj.name
             is_collider = obj.name.startswith(collider_prefixes)
             usage = obj.get("usage", "")
             if not is_collider:
@@ -1060,17 +1843,47 @@ class RPF_OT_collision_view(bpy.types.Operator):
             elif self.mode == 'MODEL':
                 visible = False
             elif self.mode == 'UCX':
-                visible = usage in {"Vehicle", "MineTrigger"}
+                visible = usage == "Vehicle"
             elif self.mode == 'FIRE':
                 visible = usage in {"FireGeo", "GlassFire"}
+            elif self.mode == 'GLASS':
+                visible = name.startswith(("UTM_Glass", "UTM_GlassFire")) or usage == "GlassFire"
+            elif self.mode == 'WHEELS':
+                visible = (
+                    name.startswith(("UCL_MT_wheel", "UCL_VC_wheel", "UTM_FG_Wheel"))
+                    or (usage in {"MineTrigger", "VehicleComplex"} and "wheel" in name.lower())
+                )
+            elif self.mode == 'WHEEL_VC':
+                visible = name.startswith(("UCL_VC_", "UTM_VC_")) or usage == "VehicleComplex"
+            elif self.mode == 'WHEEL_FG':
+                visible = name.startswith("UTM_FG_Wheel") or (usage == "FireGeo" and "wheel" in name.lower())
+            elif self.mode == 'WHEEL_MT':
+                visible = name.startswith("UCL_MT_wheel") or (usage == "MineTrigger" and "wheel" in name.lower())
             else:
                 visible = True
             obj.hide_set(not visible)
             if is_collider:
-                obj.show_wire = visible
-                obj.show_all_edges = visible
+                obj.show_wire = visible and self.mode == 'UCX'
+                obj.show_all_edges = visible and self.mode == 'UCX'
                 obj.show_in_front = visible
-                obj.display_type = 'SOLID' if visible and usage == "Vehicle" else 'WIRE'
+                obj.color = ENFUSION_LAYER_COLORS.get(usage, obj.color)
+                obj.display_type = 'SOLID' if visible and self.mode in solid_review_modes else 'WIRE'
+                if visible and self.mode in {'FIRE', 'GLASS'} | wheel_modes:
+                    obj.show_wire = False
+                    obj.show_all_edges = False
+        for area in context.screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type != 'VIEW_3D':
+                    continue
+                space.shading.type = 'SOLID'
+                space.shading.color_type = 'OBJECT'
+                space.shading.show_xray = self.mode in {'FIRE', 'GLASS'} | wheel_modes
+                space.shading.xray_alpha = 0.35
+                if self.mode in {'FIRE', 'GLASS'} | wheel_modes:
+                    space.overlay.show_wireframes = False
+                    space.overlay.wireframe_opacity = 0.0
         context.scene["rpf_collision_view"] = self.mode
         self.report({'INFO'}, f"collision review: {self.mode}")
         return {'FINISHED'}
@@ -1122,7 +1935,7 @@ class RPF_OT_sort_collapse(bpy.types.Operator):
         normalized = _normalize_ebt_colliders()
         root = bpy.data.collections.get("Colliders")
         if root:
-            for name in ("Vehicle", "MineTrigger", "FireGeo", "GlassFire"):
+            for name in ("Vehicle", "MineTrigger", "VehicleComplex", "FireGeo", "GlassFire"):
                 layer = bpy.data.collections.get(name)
                 if layer and layer.name not in {child.name for child in root.children}:
                     root.children.link(layer)
@@ -2003,14 +2816,23 @@ def _fbx_export(path, objs):
         raise ValueError(f"nothing to export to {path}")
 
     hidden = {o: (o.hide_get(), o.hide_viewport, o.hide_select) for o in export_objs}
-    bpy.ops.object.select_all(action='DESELECT')
+    view_layer = bpy.context.view_layer
+    selected_before = [o for o in view_layer.objects if o.select_get()]
+    active_before = view_layer.objects.active
+    # Do not use bpy.ops.object.select_all here. When the export operator is
+    # launched from Blender side panels or Workbench-driven contexts, that
+    # operator can fail its poll even though object data selection is valid.
+    for o in view_layer.objects:
+        try:
+            o.select_set(False)
+        except RuntimeError:
+            pass
     for o in export_objs:
         o.hide_viewport = False
         o.hide_select = False
         o.hide_set(False)
         o.select_set(True)
-    bpy.context.view_layer.objects.active = export_objs[0]
-    armatures = [o for o in export_objs if o.type == 'ARMATURE']
+    view_layer.objects.active = export_objs[0]
     try:
         bpy.ops.export_scene.fbx(
             filepath=path, use_selection=True,
@@ -2026,11 +2848,103 @@ def _fbx_export(path, objs):
             bake_anim_use_all_actions=False,
             bake_anim_use_nla_strips=False)
     finally:
+        for o in view_layer.objects:
+            try:
+                o.select_set(False)
+            except RuntimeError:
+                pass
+        for o in selected_before:
+            if o.name in bpy.data.objects:
+                try:
+                    o.select_set(True)
+                except RuntimeError:
+                    pass
+        if active_before and active_before.name in bpy.data.objects:
+            view_layer.objects.active = active_before
         for o, (was_hidden, was_viewport_hidden, was_select_locked) in hidden.items():
             o.hide_select = was_select_locked
             o.hide_viewport = was_viewport_hidden
             o.hide_set(was_hidden)
     return path
+
+
+def _material_named(name):
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name)
+    return mat
+
+
+def _temporary_master_material_overrides(objs):
+    """Return a restore callback after applying export-only material policy.
+
+    Workbench's Materials panel groups by material name, not Blender part name.
+    If an object named/collected as `interior` still has body/bottom material
+    slots on many faces, Workbench will show those faces under body/bottom and
+    the `interior` isolate looks like only a few door cards. Coerce the master
+    FBX export copy path by temporarily making interior-part faces use the
+    `interior` source material, then restore the Blender scene immediately.
+    """
+    backups = []
+    for obj in objs:
+        if not obj or obj.type != 'MESH':
+            continue
+        if obj.name.startswith(COLLIDER_PFX):
+            continue
+        part = (part_of(obj) or obj.name.split(".", 1)[0]).lower()
+        if part != "interior":
+            continue
+        mesh = obj.data
+        backups.append((
+            obj,
+            [material for material in mesh.materials],
+            [polygon.material_index for polygon in mesh.polygons],
+        ))
+        mesh.materials.clear()
+        mesh.materials.append(_material_named("interior"))
+        for polygon in mesh.polygons:
+            polygon.material_index = 0
+
+    def restore():
+        for obj, materials, indices in backups:
+            if obj.name not in bpy.data.objects:
+                continue
+            mesh = obj.data
+            mesh.materials.clear()
+            for material in materials:
+                mesh.materials.append(material)
+            for polygon, index in zip(mesh.polygons, indices):
+                polygon.material_index = index
+
+    return restore
+
+
+def _ensure_mesh_uvs(obj):
+    """Ensure generated slot/collider meshes import with texture coordinates.
+
+    Do not touch existing UV maps. Wheel slot export uses real visual wheel
+    meshes, and rebuilding those UVs destroys the tire/rim texture layout.
+    """
+    if not obj or obj.type != 'MESH' or not obj.data.vertices or not obj.data.polygons:
+        return
+    mesh = obj.data
+    if mesh.uv_layers:
+        return
+    mesh.uv_layers.new(name="UVMap")
+    layer = mesh.uv_layers.active
+    coords = [vertex.co for vertex in mesh.vertices]
+    mins = [min(co[i] for co in coords) for i in range(3)]
+    maxs = [max(co[i] for co in coords) for i in range(3)]
+    spans = [max(maxs[i] - mins[i], 1e-6) for i in range(3)]
+    axes = sorted(range(3), key=lambda axis: spans[axis], reverse=True)[:2]
+    axis_u, axis_v = axes[0], axes[1]
+    for polygon in mesh.polygons:
+        for loop_index in polygon.loop_indices:
+            co = mesh.vertices[mesh.loops[loop_index].vertex_index].co
+            layer.data[loop_index].uv = (
+                (co[axis_u] - mins[axis_u]) / spans[axis_u],
+                (co[axis_v] - mins[axis_v]) / spans[axis_v],
+            )
 
 
 def _bare_copy(src, name, at_origin=False):
@@ -2046,6 +2960,130 @@ def _bare_copy(src, name, at_origin=False):
     for m in list(o.modifiers):
         o.modifiers.remove(m)
     return o
+
+
+def _centered_visual_copy(src, name):
+    """Duplicate visual mesh around its world bbox center for slot FBX export.
+
+    The source object is never moved. This bakes evaluated world-space geometry
+    into a new identity object at the origin, so wheel FBXs pivot around the
+    tire centre even when the source mesh origin was elsewhere.
+    """
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    evaluated = src.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    try:
+        verts_world = [evaluated.matrix_world @ vertex.co for vertex in mesh.vertices]
+        if verts_world:
+            center = sum(verts_world, Vector()) / len(verts_world)
+        else:
+            mn, mx = wbbox(src)
+            center = (mn + mx) * 0.5
+        new_mesh = bpy.data.meshes.new(name)
+        new_mesh.from_pydata(
+            [tuple(vertex - center) for vertex in verts_world],
+            [],
+            [list(poly.vertices) for poly in mesh.polygons],
+        )
+        new_mesh.update()
+        for material in src.data.materials:
+            new_mesh.materials.append(material)
+        for dst_poly, src_poly in zip(new_mesh.polygons, mesh.polygons):
+            dst_poly.material_index = src_poly.material_index
+        if mesh.uv_layers.active:
+            src_uvs = mesh.uv_layers.active.data
+            uv_layer = new_mesh.uv_layers.new(name=mesh.uv_layers.active.name or "UVMap")
+            for index, dst_uv in enumerate(uv_layer.data):
+                if index < len(src_uvs):
+                    dst_uv.uv = src_uvs[index].uv
+    finally:
+        evaluated.to_mesh_clear()
+    obj = bpy.data.objects.new(name, new_mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.matrix_world = Matrix.Identity(4)
+    return obj
+
+
+def _centered_visual_copy_many(sources, name):
+    sources = [src for src in sources if src and src.type == 'MESH']
+    if len(sources) == 1:
+        return _centered_visual_copy(sources[0], name)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    datasets = []
+    all_world = []
+    for src in sources:
+        evaluated = src.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        try:
+            verts_world = [evaluated.matrix_world @ vertex.co for vertex in mesh.vertices]
+            faces = [list(poly.vertices) for poly in mesh.polygons]
+            material_indices = [poly.material_index for poly in mesh.polygons]
+            materials = [material for material in src.data.materials]
+            if mesh.uv_layers.active:
+                src_uvs = mesh.uv_layers.active.data
+                face_uvs = [
+                    [src_uvs[loop_index].uv.copy() for loop_index in poly.loop_indices]
+                    for poly in mesh.polygons
+                ]
+                uv_name = mesh.uv_layers.active.name or "UVMap"
+            else:
+                face_uvs = None
+                uv_name = "UVMap"
+            datasets.append((src, verts_world, faces, material_indices, materials, face_uvs, uv_name))
+            all_world.extend(verts_world)
+        finally:
+            evaluated.to_mesh_clear()
+    if not all_world:
+        return None
+    center = sum(all_world, Vector()) / len(all_world)
+    verts = []
+    faces = []
+    face_materials = []
+    face_uvs_out = []
+    uv_name_out = "UVMap"
+    materials = []
+    material_lookup = {}
+    for _src, verts_world, src_faces, material_indices, src_materials, src_face_uvs, src_uv_name in datasets:
+        vert_offset = len(verts)
+        verts.extend(tuple(vertex - center) for vertex in verts_world)
+        mat_offset_by_index = {}
+        for index, material in enumerate(src_materials):
+            if material is None:
+                continue
+            if material.name not in material_lookup:
+                material_lookup[material.name] = len(materials)
+                materials.append(material)
+            mat_offset_by_index[index] = material_lookup[material.name]
+        for face, material_index in zip(src_faces, material_indices):
+            faces.append([vertex + vert_offset for vertex in face])
+            face_materials.append(mat_offset_by_index.get(material_index, 0))
+        if src_face_uvs is not None:
+            face_uvs_out.extend(src_face_uvs)
+            uv_name_out = src_uv_name
+        else:
+            face_uvs_out.extend(None for _face in src_faces)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    for material in materials:
+        mesh.materials.append(material)
+    for polygon, material_index in zip(mesh.polygons, face_materials):
+        polygon.material_index = material_index
+    if any(face_uvs is not None for face_uvs in face_uvs_out):
+        uv_layer = mesh.uv_layers.new(name=uv_name_out)
+        loop_index = 0
+        for polygon, face_uvs in zip(mesh.polygons, face_uvs_out):
+            if face_uvs is None:
+                loop_index += len(polygon.loop_indices)
+                continue
+            for uv in face_uvs:
+                if loop_index < len(uv_layer.data):
+                    uv_layer.data[loop_index].uv = uv
+                loop_index += 1
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.matrix_world = Matrix.Identity(4)
+    return obj
 
 
 def _export_identity_path(export_root):
@@ -2101,13 +3139,20 @@ _WHEEL_BODY_GUARD = ("arch", "well", "house", "fender", "guard", "mudflap",
 _WHEEL_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:wheel|wheels|tyre|tire)(?:$|[_.\s\d])', _rpf_re.I)
 _GLASS_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:glass|window|windows|windshield|windscreen)(?:$|[_.\s\d])', _rpf_re.I)
 _LIGHT_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:headlight|brakelight|taillight|tail_light|light|lights|lamp|indicator|blinker)(?:$|[_.\s\d])', _rpf_re.I)
+_DOOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:door|doors)(?:$|[_.\s\d])', _rpf_re.I)
+_HOOD_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:hood|bonnet)(?:$|[_.\s\d])', _rpf_re.I)
+_TRUNK_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:trunk|boot|hatch|tailgate|decklid)(?:$|[_.\s\d])', _rpf_re.I)
+_REAR_AREA_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:tray|bed|cargo|load|rearbody|tub)(?:$|[_.\s\d])', _rpf_re.I)
+_INTERIOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:interior|inside|seat|seats|dash|dashboard|console|pedal|steering|wheelhouse|carpet|fabric)(?:$|[_.\s\d])', _rpf_re.I)
+_MECH_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:engine|motor|battery|fuel|tank|gearbox|transmission|diff|differential|exhaust|suspension|axle|driveshaft|chassis|undercarriage|underbody)(?:$|[_.\s\d])', _rpf_re.I)
+_BRAKE_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:brake|caliper|disc|rotor)(?:$|[_.\s\d])', _rpf_re.I)
 
 
 def _is_wheel_part(name):
     low = name.lower()
     if any(g in low for g in _WHEEL_BODY_GUARD):
         return False  # wheel arch / fender / mudguard are BODY, not the tire
-    return bool(_WHEEL_RE.search("_" + name + "_"))
+    return is_road_wheel_name(name)
 
 
 def _is_glass_part(name):
@@ -2118,9 +3163,348 @@ def _is_light_part(name):
     return bool(_LIGHT_RE.search("_" + name + "_"))
 
 
+def _object_semantic_text(obj):
+    bits = [obj.name]
+    bits.extend(collection.name for collection in obj.users_collection)
+    bits.extend(slot.material.name for slot in obj.material_slots if slot.material)
+    return " ".join(bits).lower()
+
+
+def _scene_render_meshes():
+    return [
+        obj for obj in bpy.context.scene.objects
+        if obj.type == 'MESH' and not obj.name.startswith(COLLIDER_PFX)
+    ]
+
+
+def _combined_bbox(meshes):
+    mn = Vector((1e9, 1e9, 1e9))
+    mx = Vector((-1e9, -1e9, -1e9))
+    for obj in meshes:
+        a, b = wbbox(obj)
+        mn.x = min(mn.x, a.x); mn.y = min(mn.y, a.y); mn.z = min(mn.z, a.z)
+        mx.x = max(mx.x, b.x); mx.y = max(mx.y, b.y); mx.z = max(mx.z, b.z)
+    return mn, mx
+
+
+def _lr_tag(center, mn, mx):
+    mid = (mn.x + mx.x) * 0.5
+    return "L" if center.x <= mid else "R"
+
+
+def _fr_tag(center, mn, mx):
+    mid = (mn.y + mx.y) * 0.5
+    return "F" if center.y >= mid else "R"
+
+
+def _wheel_or_brake_group(prefix, center, mn, mx):
+    return f"{prefix}_{_fr_tag(center, mn, mx)}{_lr_tag(center, mn, mx)}"
+
+
+def _door_group(center, mn, mx, text):
+    if "trunk" in text or "boot" in text or "hatch" in text or "tailgate" in text:
+        return "door_trunk"
+    front_hint = any(token in text for token in ("front", "_fl", "_fr", ".fl", ".fr", "l01", "r01"))
+    rear_hint = any(token in text for token in ("rear", "_rl", "_rr", ".rl", ".rr", "l02", "r02"))
+    side = _lr_tag(center, mn, mx)
+    if front_hint and not rear_hint:
+        row = "F"
+    elif rear_hint and not front_hint:
+        row = "R"
+    else:
+        row = _fr_tag(center, mn, mx)
+    return f"door_{row}{side}"
+
+
+def _material_family(text):
+    if any(token in text for token in ("glass", "window", "windscreen", "windshield")):
+        return "glass"
+    if any(token in text for token in ("rubber", "tire", "tyre")):
+        return "rubber"
+    if any(token in text for token in ("fabric", "cloth", "carpet", "seat")):
+        return "fabric"
+    if any(token in text for token in ("plastic", "lamp", "lens", "trim")):
+        return "plastic"
+    if any(token in text for token in ("metal", "steel", "iron", "chrome", "aluminium", "aluminum")):
+        return "metal"
+    return "unknown"
+
+
+def _semantic_from_existing_part(part, center, mn, mx):
+    if not part:
+        return None
+    if part.startswith("wheel_"):
+        return {"category": "wheel", "group": part, "role": "wheel-slot"}
+    if part.startswith("brake_"):
+        return {"category": "brake", "group": part, "role": "firegeo"}
+    if part.startswith("window_") or part == "windows_body":
+        return {"category": "glass", "group": part, "role": "dst-glass"}
+    if part.startswith("lights_"):
+        return {"category": "light_cover", "group": part, "role": "firegeo"}
+    if part in DOORS:
+        return {"category": "door", "group": part, "role": "vehicle"}
+    if part in {"Steering_Wheel", "Pedal_Brake", "Pedal_Accelerator", "interior"}:
+        return {"category": "interior", "group": "interior", "role": "firegeo"}
+    if part == "exterior":
+        y_span = max(mx.y - mn.y, 1e-6)
+        z_span = max(mx.z - mn.z, 1e-6)
+        y_norm = (center.y - mn.y) / y_span
+        z_norm = (center.z - mn.z) / z_span
+        if z_norm > 0.42 and 0.25 < y_norm < 0.82:
+            return {"category": "cab", "group": "cab", "role": "vehicle"}
+        if y_norm < 0.30:
+            return {"category": "rear_area", "group": "rear_area", "role": "vehicle"}
+        return {"category": "exterior", "group": "exterior", "role": "vehicle"}
+    return None
+
+
+def _classify_vehicle_object(obj, mn, mx):
+    text = _object_semantic_text(obj)
+    a, b = wbbox(obj)
+    center = (a + b) * 0.5
+    existing = _semantic_from_existing_part(part_of(obj), center, mn, mx)
+    if existing:
+        result = existing
+    elif _is_wheel_part(text):
+        result = {"category": "wheel", "group": _wheel_or_brake_group("wheel", center, mn, mx), "role": "wheel-slot"}
+    elif _BRAKE_RE.search("_" + text + "_"):
+        result = {"category": "brake", "group": _wheel_or_brake_group("brake", center, mn, mx), "role": "firegeo"}
+    elif _is_glass_part(text) or _material_family(text) == "glass":
+        result = {"category": "glass", "group": "glass", "role": "dst-glass"}
+    elif _is_light_part(text):
+        group = "lights_front" if center.y >= (mn.y + mx.y) * 0.5 else "lights_rear"
+        result = {"category": "light_cover", "group": group, "role": "firegeo"}
+    elif _DOOR_RE.search("_" + text + "_"):
+        result = {"category": "door", "group": _door_group(center, mn, mx, text), "role": "vehicle"}
+    elif _HOOD_RE.search("_" + text + "_"):
+        result = {"category": "hood", "group": "hood", "role": "vehicle"}
+    elif _TRUNK_RE.search("_" + text + "_"):
+        result = {"category": "trunk", "group": "door_trunk", "role": "vehicle"}
+    elif _REAR_AREA_RE.search("_" + text + "_"):
+        result = {"category": "rear_area", "group": "rear_area", "role": "vehicle"}
+    elif _MECH_RE.search("_" + text + "_"):
+        group = "undercarriage" if center.z < mn.z + (mx.z - mn.z) * 0.45 else "mechanical"
+        result = {"category": "mechanical", "group": group, "role": "firegeo"}
+    elif _INTERIOR_RE.search("_" + text + "_"):
+        result = {"category": "interior", "group": "interior", "role": "firegeo"}
+    else:
+        y_span = max(mx.y - mn.y, 1e-6)
+        z_span = max(mx.z - mn.z, 1e-6)
+        y_norm = (center.y - mn.y) / y_span
+        z_norm = (center.z - mn.z) / z_span
+        if z_norm > 0.43 and 0.24 < y_norm < 0.82:
+            result = {"category": "cab", "group": "cab", "role": "vehicle"}
+        elif y_norm < 0.30:
+            result = {"category": "rear_area", "group": "rear_area", "role": "vehicle"}
+        elif z_norm < 0.22:
+            result = {"category": "undercarriage", "group": "undercarriage", "role": "vehicle"}
+        else:
+            result = {"category": "exterior", "group": "exterior", "role": "vehicle"}
+    result["material"] = _material_family(text)
+    result["center"] = center
+    result["bbox"] = (a, b)
+    return result
+
+
+def _semantic_collision_groups():
+    preferred = [
+        "exterior", "cab", "rear_area", "hood", "undercarriage",
+        "door_FL", "door_FR", "door_RL", "door_RR", "door_trunk",
+    ]
+    groups = {
+        obj.get("rpf_collision_group") for obj in _scene_render_meshes()
+        if obj.get("rpf_collision_role") == "vehicle" and obj.get("rpf_collision_group")
+    }
+    ordered = [group for group in preferred if group in groups]
+    ordered.extend(sorted(group for group in groups if group not in preferred))
+    return ordered
+
+
+def _semantic_group_objects(group):
+    return [
+        obj for obj in _scene_render_meshes()
+        if obj.get("rpf_collision_group") == group
+    ]
+
+
+class RPF_OT_analyze_vehicle_parts(bpy.types.Operator):
+    bl_idname = "rpf.analyze_vehicle_parts"
+    bl_label = "Analyze Vehicle Parts"
+    bl_description = ("Classify render meshes into exterior, cab, rear area, doors, "
+                      "glass, light covers, wheels, brakes and mechanical groups. "
+                      "Tags are used by grouped CoACD/V-HACD collision without moving meshes")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    select_vehicle_groups: bpy.props.BoolProperty(
+        name="Select Vehicle Groups",
+        default=False,
+        description="Select meshes that will feed main Vehicle UCX collision after analysis",
+    )
+
+    def execute(self, context):
+        meshes = _scene_render_meshes()
+        if not meshes:
+            self.report({'ERROR'}, "no render meshes to analyze")
+            return {'CANCELLED'}
+        mn, mx = _combined_bbox(meshes)
+        counts = Counter()
+        roles = Counter()
+        for obj in meshes:
+            info = _classify_vehicle_object(obj, mn, mx)
+            obj["rpf_category"] = info["category"]
+            obj["rpf_collision_group"] = info["group"]
+            obj["rpf_collision_role"] = info["role"]
+            obj["rpf_material_hint"] = info["material"]
+            counts[info["group"]] += 1
+            roles[info["role"]] += 1
+        groups = _semantic_collision_groups()
+        if groups:
+            context.scene.rpf_build_categories = ",".join(groups)
+        summary = ", ".join(f"{name}:{counts[name]}" for name in sorted(counts))
+        context.scene["rpf_semantic_summary"] = summary
+        context.scene["rpf_semantic_roles"] = ", ".join(f"{name}:{roles[name]}" for name in sorted(roles))
+        print("RPF SEMANTIC ANALYSIS:", summary)
+        print("RPF SEMANTIC VEHICLE GROUPS:", groups)
+        if self.select_vehicle_groups:
+            bpy.ops.object.select_all(action='DESELECT')
+            selected = []
+            for obj in meshes:
+                if obj.get("rpf_collision_role") == "vehicle":
+                    obj.select_set(True)
+                    selected.append(obj)
+            if selected:
+                context.view_layer.objects.active = selected[0]
+                frame_view(context)
+        self.report({'INFO'}, f"analyzed {len(meshes)} meshes; Vehicle groups: {', '.join(groups) or 'none'}")
+        return {'FINISHED'}
+
+
+class RPF_OT_select_semantic_group(bpy.types.Operator):
+    bl_idname = "rpf.select_semantic_group"
+    bl_label = "Select Analyzed Group"
+    bl_description = "Select meshes tagged by Analyze Vehicle Parts for review"
+    bl_options = {'REGISTER'}
+
+    group: bpy.props.StringProperty()
+
+    def execute(self, context):
+        group = self.group.strip()
+        if not group:
+            return {'CANCELLED'}
+        objects = _semantic_group_objects(group)
+        if not objects:
+            self.report({'WARNING'}, f"no analyzed meshes in {group}; run Analyze Vehicle Parts")
+            return {'CANCELLED'}
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in objects:
+            obj.hide_set(False)
+            obj.select_set(True)
+        context.view_layer.objects.active = objects[0]
+        frame_view(context)
+        self.report({'INFO'}, f"selected {len(objects)} mesh(es): {group}")
+        return {'FINISHED'}
+
+
 # ----------------------------------------------------------------------------
 # WHEEL SEPARATION + V-HACD MULTI-HULL CONVEX DECOMPOSITION
 # ----------------------------------------------------------------------------
+
+def _wheel_bones_world():
+    """World positions of the four wheel bones keyed by their wheel_XX name."""
+    arm = _get_armature()
+    if not arm:
+        return {}
+    bmap = {'v_wheel_l01': 'wheel_FL', 'v_wheel_r01': 'wheel_FR',
+            'v_wheel_l02': 'wheel_RL', 'v_wheel_r02': 'wheel_RR'}
+    out = {}
+    for bone_name, wheel_name in bmap.items():
+        bone = arm.data.bones.get(bone_name)
+        if bone:
+            out[wheel_name] = arm.matrix_world @ bone.head_local
+    return out
+
+
+def _separate_wheels_by_bones(context, radius=0.55, corner_radius=0.78):
+    """Extract wheels that are baked into body meshes, by proximity to v_wheel_* bones.
+    Island-based, so the body shell (centroid far from any wheel bone) is never grabbed."""
+    import bmesh as _bm
+    bones = _wheel_bones_world()
+    if not bones:
+        return []
+    bodies = [o for o in context.scene.objects
+              if o.type == 'MESH' and not o.name.startswith(COLLIDER_PFX)
+              and not _is_wheel_part(o.name) and not _is_glass_part(o.name)
+              and not _is_light_part(o.name)]
+    if context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    tmp_objs = []
+    for body in bodies:
+        mw = body.matrix_world
+        bm = _bm.new(); bm.from_mesh(body.data); bm.verts.ensure_lookup_table()
+        seen = set(); wheelidx = set()
+        for v in bm.verts:
+            if v.index in seen:
+                continue
+            stack = [v]; comp = []
+            while stack:
+                cur = stack.pop()
+                if cur.index in seen:
+                    continue
+                seen.add(cur.index); comp.append(cur)
+                for e in cur.link_edges:
+                    ov = e.other_vert(cur)
+                    if ov.index not in seen:
+                        stack.append(ov)
+            centre = sum((mw @ x.co for x in comp), Vector()) / len(comp)
+            if any((centre - bp).length < radius for bp in bones.values()):
+                wheelidx.update(x.index for x in comp)
+        bm.free()
+        if not wheelidx:
+            continue
+        bpy.ops.object.select_all(action='DESELECT')
+        body.select_set(True); context.view_layer.objects.active = body
+        bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        for i in wheelidx:
+            body.data.vertices[i].select = True
+        bpy.ops.object.mode_set(mode='EDIT'); before = set(bpy.data.objects.keys())
+        bpy.ops.mesh.separate(type='SELECTED'); bpy.ops.object.mode_set(mode='OBJECT')
+        tmp_objs += [bpy.data.objects[n] for n in set(bpy.data.objects.keys()) - before]
+    if not tmp_objs:
+        return []
+    bpy.ops.object.select_all(action='DESELECT')
+    for t in tmp_objs:
+        t.select_set(True)
+    context.view_layer.objects.active = tmp_objs[0]
+    if len(tmp_objs) > 1:
+        bpy.ops.object.join()
+    pool = context.view_layer.objects.active
+    made = []
+    for wheel_name, bp in bones.items():
+        if not pool or pool.name not in bpy.data.objects:
+            break
+        bpy.ops.object.select_all(action='DESELECT')
+        pool.select_set(True); context.view_layer.objects.active = pool
+        bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        hit = 0
+        for v in pool.data.vertices:
+            if (pool.matrix_world @ v.co - bp).length < corner_radius:
+                v.select = True; hit += 1
+        if hit == 0:
+            continue
+        bpy.ops.object.mode_set(mode='EDIT'); before = set(bpy.data.objects.keys())
+        bpy.ops.mesh.separate(type='SELECTED'); bpy.ops.object.mode_set(mode='OBJECT')
+        new = [bpy.data.objects[k] for k in set(bpy.data.objects.keys()) - before]
+        if not new:
+            continue
+        wheel = new[0]; wheel.name = wheel_name
+        move_to_coll(wheel, wheel_name)
+        made.append(wheel_name)
+    if pool and pool.name in bpy.data.objects and len(pool.data.vertices) < 24:
+        bpy.data.objects.remove(pool, do_unlink=True)
+    return made
+
 
 class RPF_OT_separate_wheels(bpy.types.Operator):
     bl_idname = "rpf.separate_wheels"
@@ -2137,7 +3521,14 @@ class RPF_OT_separate_wheels(bpy.types.Operator):
                 if o.type == 'MESH' and not o.name.startswith(COLLIDER_PFX)
                 and _is_wheel_part(o.name)]
         if not srcs:
-            self.report({'ERROR'}, "no wheel-named meshes (name them e.g. 'wheel', 'tyre')")
+            # No wheel-named meshes: wheels are likely baked into the body. Extract
+            # them by proximity to the v_wheel_* bones (island-based, body-safe).
+            made = _separate_wheels_by_bones(context)
+            if made:
+                self.report({'INFO'}, "wheels by bone proximity -> " + ", ".join(sorted(made)))
+                return {'FINISHED'}
+            self.report({'ERROR'}, "no wheel-named meshes, and no v_wheel_* bones with "
+                                   "nearby geometry to extract")
             return {'CANCELLED'}
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -2233,23 +3624,87 @@ def _reduce_mesh(verts, faces, target_tris):
         return verts, faces
     obj = bpy.data.objects.new("_rpf_vhacd_tmp", me)
     bpy.context.scene.collection.objects.link(obj)
-    mod = obj.modifiers.new("d", 'DECIMATE')
-    mod.ratio = max(0.02, min(1.0, target_tris / float(len(faces))))
-    deps = bpy.context.evaluated_depsgraph_get()
-    ev = obj.evaluated_get(deps)
-    em = ev.to_mesh()
-    nv = [tuple(v.co) for v in em.vertices]
-    em.calc_loop_triangles()
-    nf = [(t.vertices[0], t.vertices[1], t.vertices[2]) for t in em.loop_triangles]
-    ev.to_mesh_clear()
-    bpy.data.objects.remove(obj, do_unlink=True)
-    bpy.data.meshes.remove(me)
+    nv, nf = [], []
+    try:
+        mod = obj.modifiers.new("RPF_VHACD_INPUT_DECIMATE", 'DECIMATE')
+        mod.ratio = max(0.01, min(1.0, target_tris / float(len(faces))))
+        mod.use_collapse_triangulate = True
+        bpy.context.view_layer.update()
+        deps = bpy.context.evaluated_depsgraph_get()
+        ev = obj.evaluated_get(deps)
+        em = ev.to_mesh()
+        try:
+            nv = [tuple(v.co) for v in em.vertices]
+            em.calc_loop_triangles()
+            nf = [(t.vertices[0], t.vertices[1], t.vertices[2]) for t in em.loop_triangles]
+        finally:
+            ev.to_mesh_clear()
+    finally:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if me.users == 0:
+            bpy.data.meshes.remove(me)
     if len(nv) < 4 or not nf:
         return verts, faces
+    if len(nf) > max(target_tris * 2, target_tris + 500):
+        print(
+            f"RPF V-HACD: decimate missed target ({len(faces)} -> {len(nf)} tris, target {target_tris}); using fallback-safe input",
+            flush=True,
+        )
+        return verts, faces
+    print(f"RPF V-HACD: reduced input {len(faces)} -> {len(nf)} tris", flush=True)
     return nv, nf
 
 
-def _vhacd_coacd(verts, faces, threshold):
+def _too_dense_for_decomposition(face_count, target_tris):
+    return target_tris > 0 and face_count > max(target_tris * 2, target_tris + 500)
+
+
+def _hull_stats(points):
+    pts = [p if isinstance(p, Vector) else Vector(p) for p in points]
+    if not pts:
+        return Vector(), 0.0
+    mn = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+    mx = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+    center = (mn + mx) * 0.5
+    span = mx - mn
+    volume = max(span.x, 0.001) * max(span.y, 0.001) * max(span.z, 0.001)
+    return center, volume
+
+
+def _select_representative_hulls(hulls, max_hulls, label):
+    """Limit backend hull output without dropping whole vehicle regions.
+
+    CoACD can return 100+ hulls for an open car shell. Taking the first N is
+    arbitrary and caused missing exterior sections. This keeps the largest hull,
+    then uses farthest-point sampling weighted by size so the final set covers
+    the car length/width/height instead of only the first backend partition.
+    """
+    valid = [hull for hull in hulls if len(hull) >= 4]
+    if len(valid) <= max_hulls:
+        return valid
+    stats = [(hull, *_hull_stats(hull)) for hull in valid]
+    stats.sort(key=lambda item: item[2], reverse=True)
+    chosen = [stats.pop(0)]
+    while stats and len(chosen) < max_hulls:
+        best_index = 0
+        best_score = -1.0
+        for index, item in enumerate(stats):
+            _hull, center, volume = item
+            nearest = min((center - chosen_item[1]).length for chosen_item in chosen)
+            score = nearest * (volume ** 0.25)
+            if score > best_score:
+                best_score = score
+                best_index = index
+        chosen.append(stats.pop(best_index))
+    selected = [item[0] for item in chosen]
+    print(
+        f"RPF V-HACD: {label} returned {len(valid)} hulls; selected {len(selected)} representative hulls",
+        flush=True,
+    )
+    return selected
+
+
+def _vhacd_coacd(verts, faces, threshold, props=None):
     """Convex decomposition via the CoACD python module. Returns hull point-lists."""
     try:
         import numpy as np
@@ -2259,16 +3714,67 @@ def _vhacd_coacd(verts, faces, threshold):
     try:
         mesh = coacd.Mesh(np.asarray(verts, dtype="float64"),
                           np.asarray(faces, dtype="int32"))
+        props = props or {}
+        kwargs = {
+            "threshold": threshold,
+            "max_convex_hull": int(props.get("max_hulls", 24)),
+            "max_ch_vertex": int(props.get("max_vertices", 64)),
+        }
         try:
-            parts = coacd.run_coacd(mesh, threshold=threshold)
+            parts = coacd.run_coacd(mesh, **kwargs)
         except TypeError:
-            parts = coacd.run_coacd(mesh)
+            kwargs.pop("max_ch_vertex", None)
+            try:
+                parts = coacd.run_coacd(mesh, **kwargs)
+            except TypeError:
+                kwargs.pop("max_convex_hull", None)
+                try:
+                    parts = coacd.run_coacd(mesh, **kwargs)
+                except TypeError:
+                    parts = coacd.run_coacd(mesh)
     except Exception:
         return None
     hulls = []
     for part in parts:
         v = part[0]
         hulls.append([(float(p[0]), float(p[1]), float(p[2])) for p in v])
+    return hulls or None
+
+
+def _vhacd_vhacdx(verts, faces, props):
+    """Convex decomposition through Enfusion Tools' optional vhacdx backend."""
+    try:
+        import numpy as np
+        import vhacdx
+    except Exception:
+        return None
+    try:
+        arr_verts = np.asarray(verts, dtype="float64")
+        arr_faces = np.asarray(faces, dtype="uint32").reshape((-1, 3))
+        scale = float(props.get("pre_scale", 1.0))
+        if 1.0 - scale > 0.01 and len(arr_verts):
+            centroid = arr_verts.mean(axis=0)
+            arr_verts = (arr_verts - centroid) * scale + centroid
+        convex_hulls = vhacdx.compute_vhacd(
+            arr_verts,
+            arr_faces.ravel(),
+            maxConvexHulls=int(props.get("max_hulls", 16)),
+            resolution=int(props.get("resolution", 100000)),
+            minimumVolumePercentErrorAllowed=float(props.get("volume_error", 1.0)),
+            maxRecursionDepth=int(props.get("recursion_depth", 10)),
+            shrinkWrap=bool(props.get("shrink_wrap", True)),
+            fillMode=str(props.get("fill_mode", "flood")),
+            maxNumVerticesPerCH=int(props.get("max_vertices", 64)),
+            asyncACD=True,
+            minEdgeLength=int(props.get("min_edge_length", 2)),
+            findBestPlane=bool(props.get("split_hulls", False)),
+        )
+    except Exception as exc:
+        print(f"RPF VHACDX failed: {exc}", flush=True)
+        return None
+    hulls = []
+    for hull_verts, _hull_faces in convex_hulls:
+        hulls.append([(float(p[0]), float(p[1]), float(p[2])) for p in hull_verts])
     return hulls or None
 
 
@@ -2318,6 +3824,74 @@ def _vhacd_exe(verts, faces, exe):
     return pts or None
 
 
+def _find_vhacd_executable():
+    """Find a user-installed V-HACD/TestVHACD executable without scanning the whole disk."""
+    import os
+    import shutil
+    candidates = []
+    names = (
+        "TestVHACD.exe", "VHACD.exe", "V-HACD.exe", "testvhacd.exe",
+        "vhacd.exe", "testVHACD", "vhacd", "TestVHACD",
+    )
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    env_keys = ("VHACD_EXE", "VHACD_PATH", "TESTVHACD_EXE", "COACD_VHACD_EXE")
+    for key in env_keys:
+        value = os.environ.get(key)
+        if value:
+            candidates.append(value)
+    addon_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in names:
+        candidates.append(os.path.join(addon_dir, "tools", "vhacd", name))
+    roots = [
+        os.path.dirname(bpy.data.filepath) if bpy.data.filepath else "",
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Downloads"),
+        os.path.expanduser("~/Documents"),
+        os.path.join(os.path.expanduser("~"), "Tools"),
+        os.path.join(os.path.expanduser("~"), "bin"),
+    ]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for name in names:
+            candidates.append(os.path.join(root, name))
+        for folder in ("VHACD", "V-HACD", "TestVHACD", "CoACD", "coacd"):
+            for name in names:
+                candidates.append(os.path.join(root, folder, name))
+    for candidate in candidates:
+        candidate = bpy.path.abspath(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+
+def _decompose_hulls(verts, faces, threshold, exe, backend, vhacd_props=None):
+    """Return (backend_used, hull_point_lists)."""
+    backend = backend or 'AUTO'
+    if backend in {'AUTO', 'COACD'}:
+        hulls = _vhacd_coacd(verts, faces, threshold, vhacd_props)
+        if hulls is not None:
+            return "coacd", hulls
+        if backend == 'COACD':
+            return "none", None
+    if backend in {'AUTO', 'VHACDX'}:
+        hulls = _vhacd_vhacdx(verts, faces, vhacd_props or {})
+        if hulls is not None:
+            return "vhacdx", hulls
+        if backend == 'VHACDX':
+            return "none", None
+    if backend in {'AUTO', 'EXE'}:
+        hulls = _vhacd_exe(verts, faces, exe)
+        if hulls is not None:
+            return "vhacd-exe", hulls
+        if backend == 'EXE':
+            return "none", None
+    return "convex-fallback", None
+
+
 def _capped_hull_obj(name, points, max_faces):
     """Build a single convex hull object from points, reduced to <= max_faces."""
     # Decomposition backends hand back plain tuples; _sample_hull_points expects
@@ -2342,17 +3916,20 @@ def _capped_hull_obj(name, points, max_faces):
     return bpy.data.objects.new(name, best)
 
 
-def _collision_for_part(part, index, decimate_target, threshold, max_hulls, max_faces, exe):
+def _collision_for_part(part, index, decimate_target, threshold, max_hulls, max_faces, exe, backend, vhacd_props=None):
     """Grouped collision: merge a whole part/category (its render pieces, minus
     glass/lights/wheels) into one mass, then convex-decompose THAT. Produces far fewer,
     cleaner UCX hulls than per-sub-object. Returns (made_objects, next_index)."""
     pieces = [o for o in part_objects(part) if o.type == 'MESH']
     if not pieces:
+        pieces = _semantic_group_objects(part)
+    if not pieces:
         pieces = [o for o in bpy.data.objects
                   if o.type == 'MESH' and not o.name.startswith(COLLIDER_PFX)
                   and (o.name == part or o.name.startswith(part + "."))]
     pieces = [o for o in pieces if not _is_glass_part(o.name)
-              and not _is_light_part(o.name) and not _is_wheel_part(o.name)]
+              and not _is_light_part(o.name) and not _is_wheel_part(o.name)
+              and o.get("rpf_collision_role", "vehicle") == "vehicle"]
     if not pieces:
         return [], index
     copies = []
@@ -2379,7 +3956,15 @@ def _collision_for_part(part, index, decimate_target, threshold, max_hulls, max_
     verts, faces = _reduce_mesh(verts, faces, decimate_target)
     print(f"RPF COLLISION: {part} ({len(pieces)} pieces) -> decompose {len(faces)} tris",
           flush=True)
-    hulls = _vhacd_coacd(verts, faces, threshold) or _vhacd_exe(verts, faces, exe)
+    if _too_dense_for_decomposition(len(faces), decimate_target):
+        backend_used, hulls = "convex-fallback:dense-open-input", None
+        print(
+            f"RPF COLLISION: {part} input still {len(faces)} tris after decimate target {decimate_target}; using capped convex fallback",
+            flush=True,
+        )
+    else:
+        backend_used, hulls = _decompose_hulls(verts, faces, threshold, exe, backend, vhacd_props)
+    print(f"RPF COLLISION: {part} backend={backend_used}", flush=True)
     token = _safe_name_token(part)
     made = []
     if not hulls:
@@ -2390,7 +3975,8 @@ def _collision_for_part(part, index, decimate_target, threshold, max_hulls, max_
             made.append(obj)
             index += 1
         return made, index
-    for hi, pts in enumerate(hulls[:max_hulls]):
+    selected_hulls = _select_representative_hulls(hulls, max_hulls, part)
+    for hi, pts in enumerate(selected_hulls):
         if len(pts) < 4:
             continue
         obj = _capped_hull_obj(f"UCX_MainCol_{index:02d}_{token}_{hi:02d}", pts, max_faces)
@@ -2415,17 +4001,48 @@ class RPF_OT_vhacd_selected(bpy.types.Operator):
 
     max_hulls: bpy.props.IntProperty(name="Max hulls / part", default=16, min=1, max=64)
     max_faces: bpy.props.IntProperty(name="Max faces / hull", default=200, min=12, max=200)
+    backend: bpy.props.EnumProperty(
+        name="Backend",
+        default='AUTO',
+        items=[('AUTO', "Auto", "CoACD, then external V-HACD, then convex fallback"),
+               ('COACD', "CoACD", "Use Blender Python CoACD only"),
+               ('VHACDX', "VHACD Python", "Use Enfusion Tools-style vhacdx Python backend only"),
+               ('EXE', "External", "Use external V-HACD executable only"),
+               ('FALLBACK', "Fallback", "Do not decompose; single capped convex hull")])
     threshold: bpy.props.FloatProperty(name="Concavity", default=0.05, min=0.01, max=1.0,
                                        description="CoACD concavity threshold (lower = more hulls)")
     decimate_target: bpy.props.IntProperty(
         name="Decimate input to", default=4000, min=0, max=80000,
         description="Reduce each part to ~this many tris before decomposition so Blender "
                     "doesn't freeze on dense meshes (0 = use full resolution)")
-    replace_generated: bpy.props.BoolProperty(name="Replace previous hulls", default=True)
+    replace_generated: bpy.props.BoolProperty(name="Replace previous hulls", default=False)
+    thread_count: bpy.props.IntProperty(
+        name="Worker threads",
+        default=1,
+        min=1,
+        max=8,
+        description="Run decomposition for multiple selected meshes in parallel. Blender object creation still runs on the main thread",
+    )
 
     def execute(self, context):
-        sources = [o for o in context.selected_objects
-                   if o.type == 'MESH' and not o.name.startswith(COLLIDER_PFX)]
+        import concurrent.futures
+        temp_sources = []
+        edit_source = None
+        if context.mode == 'EDIT_MESH':
+            temp_sources, edit_source = _selected_face_temp_objects(
+                context,
+                context.scene.rpf_selected_faces_split_loose,
+            )
+            if not temp_sources:
+                self.report({'ERROR'}, "Select faces first, or switch to Object Mode for whole-part V-HACD")
+                return {'CANCELLED'}
+            bpy.ops.object.mode_set(mode='OBJECT')
+            sources = temp_sources
+        else:
+            if context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            sources = [o for o in context.selected_objects
+                       if o.type == 'MESH' and not o.name.startswith(COLLIDER_PFX)]
         if not sources:
             self.report({'ERROR'}, "select one or more render-part meshes")
             return {'CANCELLED'}
@@ -2438,37 +4055,89 @@ class RPF_OT_vhacd_selected(bpy.types.Operator):
         made = []
         backend = "none"
         index = _next_main_col_index()
+        jobs = []
         for i, src in enumerate(sources):
-            print(f"RPF V-HACD {i + 1}/{len(sources)}: {src.name} ...", flush=True)
+            source_name = edit_source.name if edit_source else src.name
+            job_name = f"{source_name}_sel{i + 1:02d}" if edit_source else source_name
+            print(f"RPF V-HACD prep {i + 1}/{len(sources)}: {job_name} ...", flush=True)
             verts, faces = _world_tris(src)
             if len(verts) < 4 or not faces:
                 continue
             verts, faces = _reduce_mesh(verts, faces, self.decimate_target)
-            hulls = _vhacd_coacd(verts, faces, self.threshold)
-            if hulls is not None:
-                backend = "coacd"
+            jobs.append((job_name, verts, faces, source_name))
+
+        for temp in temp_sources:
+            if temp.name in bpy.data.objects:
+                bpy.data.objects.remove(temp, do_unlink=True)
+
+        props = _vhacd_props_from_scene(context.scene)
+        workers = min(
+            max(1, self.thread_count),
+            max(1, len(jobs)),
+            max(1, int(context.scene.rpf_ucx_threads)),
+        )
+
+        def run_job(job):
+            src_name, verts, faces, source_name = job
+            if _too_dense_for_decomposition(len(faces), self.decimate_target):
+                used, hulls = "convex-fallback:dense-open-input", None
+                print(
+                    f"RPF V-HACD: {src_name} still has {len(faces)} tris after target {self.decimate_target}; using capped convex fallback",
+                    flush=True,
+                )
             else:
-                hulls = _vhacd_exe(verts, faces, exe)
-                if hulls is not None:
-                    backend = "vhacd-exe"
-            token = _safe_name_token(src.name)
+                used, hulls = _decompose_hulls(
+                    verts,
+                    faces,
+                    self.threshold,
+                    exe,
+                    self.backend,
+                    props,
+                )
+            return src_name, verts, used, hulls, source_name
+
+        if workers > 1 and len(jobs) > 1 and self.backend != 'EXE':
+            print(f"RPF V-HACD: running {len(jobs)} decomposition jobs on {workers} worker threads", flush=True)
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                future_by_name = {pool.submit(run_job, job): job[0] for job in jobs}
+                for future in concurrent.futures.as_completed(future_by_name):
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        print(f"RPF V-HACD worker failed for {future_by_name[future]}: {exc}", flush=True)
+            order = {name: i for i, (name, _verts, _faces, _source_name) in enumerate(jobs)}
+            results.sort(key=lambda result: order.get(result[0], 9999))
+        else:
+            results = [run_job(job) for job in jobs]
+
+        for src_name, verts, backend, hulls, source_name in results:
+            token = _safe_name_token(src_name)
             if not hulls:
                 # graceful fallback: single guaranteed-convex hull
-                hull = _part_convex_hull(src, f"UCX_MainCol_{index:02d}_{token}", self.max_faces)
+                hull = _capped_hull_obj(f"UCX_MainCol_{index:02d}_{token}", verts, self.max_faces)
                 if hull:
+                    hull["rpf_ucx_source"] = source_name
+                    if edit_source:
+                        hull["rpf_ucx_selection_source"] = source_name
+                    hull["rpf_ucx_face_cap"] = self.max_faces
+                    _place_ebt_collider(hull, "Vehicle")
                     made.append(hull)
                     index += 1
                 if backend == "none":
                     backend = "convex-fallback"
                 continue
-            for hi, pts in enumerate(hulls[:self.max_hulls]):
+            selected_hulls = _select_representative_hulls(hulls, self.max_hulls, src_name)
+            for hi, pts in enumerate(selected_hulls):
                 if len(pts) < 4:
                     continue
                 name = f"UCX_MainCol_{index:02d}_{token}_{hi:02d}"
                 obj = _capped_hull_obj(name, pts, self.max_faces)
                 if obj is None:
                     continue
-                obj["rpf_ucx_source"] = src.name
+                obj["rpf_ucx_source"] = source_name
+                if edit_source:
+                    obj["rpf_ucx_selection_source"] = source_name
                 obj["rpf_ucx_face_cap"] = self.max_faces
                 _place_ebt_collider(obj, "Vehicle")
                 made.append(obj)
@@ -2505,6 +4174,11 @@ class RPF_OT_install_vhacd_deps(bpy.types.Operator):
         if result.returncode != 0:
             self.report({'ERROR'}, "pip failed: " + (result.stderr or result.stdout)[-260:])
             return {'CANCELLED'}
+        vhacdx_result = subprocess.run(
+            [py, "-m", "pip", "install", "--upgrade", "vhacdx==0.0.6"],
+            capture_output=True,
+            text=True,
+        )
         try:
             import importlib
             importlib.invalidate_caches()
@@ -2512,7 +4186,30 @@ class RPF_OT_install_vhacd_deps(bpy.types.Operator):
         except Exception as exc:
             self.report({'WARNING'}, f"installed; restart Blender to load CoACD ({exc})")
             return {'FINISHED'}
-        self.report({'INFO'}, "CoACD installed and importable")
+        found = _find_vhacd_executable()
+        vhacdx_note = "; vhacdx installed" if vhacdx_result.returncode == 0 else "; vhacdx unavailable"
+        if found:
+            context.scene.rpf_vhacd_exe = found
+            self.report({'INFO'}, "CoACD installed; V-HACD exe found" + vhacdx_note)
+        else:
+            self.report({'INFO'}, "CoACD installed; external V-HACD exe not found" + vhacdx_note)
+        return {'FINISHED'}
+
+
+class RPF_OT_find_vhacd_exe(bpy.types.Operator):
+    bl_idname = "rpf.find_vhacd_exe"
+    bl_label = "Auto-find V-HACD exe"
+    bl_description = ("Search PATH and common user folders for TestVHACD/VHACD. "
+                      "CoACD does not require this external executable")
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        found = _find_vhacd_executable()
+        if not found:
+            self.report({'WARNING'}, "no external V-HACD exe found; use Backend Auto/CoACD")
+            return {'CANCELLED'}
+        context.scene.rpf_vhacd_exe = found
+        self.report({'INFO'}, f"V-HACD exe: {found}")
         return {'FINISHED'}
 
 
@@ -2630,33 +4327,41 @@ class RPF_OT_build_all_physics(bpy.types.Operator):
                       "build FireGeo, bake LODs, then validate")
     bl_options = {'REGISTER', 'UNDO'}
 
-    use_vhacd: bpy.props.BoolProperty(name="Use V-HACD", default=True)
-    do_lod: bpy.props.BoolProperty(name="Bake LOD", default=True)
+    use_vhacd: bpy.props.BoolProperty(name="Use V-HACD", default=False)
+    do_lod: bpy.props.BoolProperty(name="Bake LOD", default=False)
 
     def execute(self, context):
         steps = []
+        if context.scene.rpf_auto_analyze_collision:
+            try:
+                bpy.ops.rpf.analyze_vehicle_parts()
+                steps.append("analyzed")
+            except Exception as exc:
+                steps.append(f"analyze-skip({exc})")
         bpy.ops.rpf.cleanup_colliders(mode='GENERATED')
         steps.append("cleaned")
         have = False
-        if self.use_vhacd:
-            try:
-                import coacd  # noqa: F401
-                have = True
-            except Exception:
-                have = bool(context.scene.rpf_vhacd_exe)
+        backend = context.scene.rpf_ucx_backend
+        if self.use_vhacd and backend != 'FALLBACK':
+            have = True
         if have:
             # GROUPED collision: merge each category into one mass, decompose THAT.
             # Body shell + one hull-set per door = far fewer, cleaner hulls than
             # decomposing 80+ tiny sub-material parts.
-            cats = ["exterior", "door_FL", "door_FR", "door_RL", "door_RR", "door_trunk"]
+            cats = [
+                token.strip() for token in context.scene.rpf_build_categories.split(",")
+                if token.strip()
+            ] or ["exterior"]
             index = _next_main_col_index()
             exe = context.scene.rpf_vhacd_exe
             dec = context.scene.rpf_ucx_decimate
             thr = context.scene.rpf_ucx_concavity
             mh = context.scene.rpf_ucx_max_hulls
+            mf = context.scene.rpf_ucx_max_faces
+            props = _vhacd_props_from_scene(context.scene)
             total = []
             for cat in cats:
-                made, index = _collision_for_part(cat, index, dec, thr, mh, 200, exe)
+                made, index = _collision_for_part(cat, index, dec, thr, mh, mf, exe, backend, props)
                 total += made
             steps.append(f"collision:grouped({len(total)}h)")
         else:
@@ -2679,6 +4384,11 @@ class RPF_OT_build_all_physics(bpy.types.Operator):
             steps.append("fixed")
         except Exception:
             pass
+        try:
+            bpy.ops.rpf.apply_collision_materials()
+            steps.append("gamemats")
+        except Exception as exc:
+            steps.append(f"gamemats-skip({exc})")
         try:
             bpy.ops.rpf.validate_ucx()
         except Exception:
@@ -2714,9 +4424,17 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
             self.report({'ERROR'}, "no vehicle armature/bones - run Build Bones first")
             return {'CANCELLED'}
 
-        # Export must never silently mutate a finalized rig. Repair bindings
-        # deliberately with "Skin All Parts", then export only after validation.
+        # Export must never silently ship broken door/wheel animation bindings.
+        # When enabled, run the same checkpointed rigid-skin repair the user can
+        # trigger from the Rig tab, then re-check before writing FBX files.
         binding_issues = _rig_binding_issues(arm)
+        if binding_issues and context.scene.rpf_auto_skin_before_export:
+            try:
+                bpy.ops.rpf.skin_parts()
+            except Exception as exc:
+                self.report({'ERROR'}, f"auto skin failed - run Skin All Parts manually: {exc}")
+                return {'CANCELLED'}
+            binding_issues = _rig_binding_issues(arm)
         if binding_issues:
             self.report({'ERROR'}, "invalid rig bindings - run Skin All Parts: "
                         + "; ".join(binding_issues[:4]))
@@ -2735,7 +4453,7 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
                 return context.scene.rpf_export_glass_firegeo
             if name.startswith(("UTM_FG_", "UCX_FG_")):
                 return context.scene.rpf_export_firegeo
-            if name.startswith(("UCL_", "UCX_")):
+            if name.startswith(("UCL_", "UCX_", "UBX_")):
                 return context.scene.rpf_export_vehicle_collision
             if o.type == 'ARMATURE':
                 return context.scene.rpf_export_armature
@@ -2744,6 +4462,14 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
             # Slot-owned VISUALS never belong in the master body XOB. Name-robust
             # detection keeps wheels / windows / light lenses out of the body even
             # when the vehicle uses non-stock part names (the export-tickbox bug).
+            if _is_steering_mesh_name(name):
+                return context.scene.rpf_export_render
+            if o.type == 'MESH':
+                role, _slot, target = _rig_role_for_obj(o)
+                if role in {"ROTATOR", "SUSPENSION", "HANDBRAKE", "PEDAL_BRAKE", "PEDAL_THROTTLE"}:
+                    return context.scene.rpf_export_render
+                if target.startswith(("v_rotator_", "v_suspension_")):
+                    return context.scene.rpf_export_render
             if _is_wheel_part(name):
                 return False
             if _is_light_part(name):
@@ -2754,16 +4480,54 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
 
         # ---- 1) master: selected render/skeleton/memory/collision classes.
         body = [o for o in context.scene.objects if include_master(o)]
-        done.append(_fbx_export(os.path.join(EXPORT_ROOT, f"{ASSET_NAME}.fbx"), body))
+        restore_master_materials = _temporary_master_material_overrides(body)
+        try:
+            done.append(_fbx_export(os.path.join(EXPORT_ROOT, f"{ASSET_NAME}.fbx"), body))
+        finally:
+            restore_master_materials()
 
-        # ---- 2) wheel: single wheel at origin + stock-named colliders
-        #      (matches SampleCar_01_wheel.xob: UCL_VC_wheel00 + UTM_FG_Wheel_L01)
-        wheel_src = bpy.data.objects.get("wheel_FL") or next(
-            (o for o in context.scene.objects
-             if o.type == 'MESH' and _is_wheel_part(o.name)), None)
-        if wheel_src and context.scene.rpf_export_wheel_slot:
-            w = _bare_copy(wheel_src, "wheel", at_origin=True)
+        # ---- 2) wheel: single wheel at origin + stock-named colliders.
+        #      SampleCar uses UCL_VC_wheel00 plus one UTM_FG_Wheel_L01 carrying
+        #      rubber+metal face materials. Keep that shape so Workbench imports
+        #      one valid wheel FireGeo collider with both surface properties.
+        def _wheel_source(name):
+            obj = bpy.data.objects.get(name)
+            return obj if obj and obj.type == 'MESH' else None
 
+        def _first_wheel(names):
+            for name in names:
+                obj = _wheel_source(name)
+                if obj:
+                    return obj
+            return next((o for o in context.scene.objects
+                         if o.type == 'MESH' and _is_wheel_part(o.name)), None)
+
+        def _wheel_export_jobs():
+            mode = context.scene.rpf_export_wheel_slot_mode
+            if mode == 'SELECTED':
+                selected = [o for o in context.selected_objects
+                            if o.type == 'MESH' and _is_wheel_part(o.name)]
+                return [("Alt", selected)] if selected else []
+            if mode == 'ALL':
+                return [(tag, [obj]) for tag, obj in (
+                    ("FL", _wheel_source("wheel_FL")),
+                    ("FR", _wheel_source("wheel_FR")),
+                    ("RL", _wheel_source("wheel_RL")),
+                    ("RR", _wheel_source("wheel_RR")),
+                ) if obj]
+            if mode == 'FRONT_REAR':
+                front = _first_wheel(("wheel_FL", "wheel_FR"))
+                rear = _first_wheel(("wheel_RL", "wheel_RR"))
+                jobs = []
+                if front:
+                    jobs.append(("Front", [front]))
+                if rear and rear != front:
+                    jobs.append(("Rear", [rear]))
+                return jobs
+            single = _first_wheel(("wheel_FL", "wheel_FR", "wheel_RL", "wheel_RR"))
+            return [("Wheel", [single])] if single else []
+
+        if context.scene.rpf_export_wheel_slot:
             def _cyl(name, radius, depth, segs):
                 me = bpy.data.meshes.new(name)
                 bm = _bm.new()
@@ -2776,27 +4540,182 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
                 bpy.context.scene.collection.objects.link(o)
                 return o
 
-            ucl = _cyl("UCL_VC_wheel00", 0.39, 0.25, 16)     # vehicle collision
-            fgw = _cyl("UTM_FG_Wheel_L01", 0.397, 0.25, 24)  # fire geometry
-            done.append(_fbx_export(os.path.join(EXPORT_ROOT, "VehParts", f"{ASSET_NAME}_Wheel.fbx"), [w, ucl, fgw]))
-            bpy.data.objects.remove(w); bpy.data.objects.remove(ucl); bpy.data.objects.remove(fgw)
-        elif context.scene.rpf_export_wheel_slot:
-            self.report({'WARNING'}, "wheel_FL not found - skipped wheel FBX")
-            print("ENFUSION EXPORT: wheel_FL not found; skipped wheel FBX")
+            def _wheel_firegeo(name, tire_radius, rim_radius, depth, segs):
+                me = bpy.data.meshes.new(name)
+                bm = _bm.new()
+
+                def add_cylinder(radius, cylinder_depth, segments, mat_index):
+                    result = _bm.ops.create_cone(
+                        bm, cap_ends=True, segments=segments,
+                        radius1=radius, radius2=radius, depth=cylinder_depth,
+                    )
+                    for v in result.get("verts", []):
+                        v.co = Vector((v.co.z, v.co.y, -v.co.x))
+                    faces = result.get("faces")
+                    if faces is None:
+                        faces = [g for g in result.get("geom", []) if isinstance(g, _bm.types.BMFace)]
+                    for face in faces:
+                        face.material_index = mat_index
+
+                add_cylinder(tire_radius, depth, segs, 0)
+                add_cylinder(rim_radius, depth * 1.12, max(12, segs // 2), 1)
+                bm.to_mesh(me); bm.free()
+                obj = bpy.data.objects.new(name, me)
+                bpy.context.scene.collection.objects.link(obj)
+                _apply_vehicle_collision_materials(obj)
+                _ensure_mesh_uvs(obj)
+                return obj
+
+            radius = context.scene.rpf_wheel_radius
+            jobs = _wheel_export_jobs()
+            if not jobs:
+                self.report({'WARNING'}, "no wheel source found - skipped wheel FBX")
+                print("ENFUSION EXPORT: no wheel source found; skipped wheel FBX")
+            for slot, sources in jobs:
+                w = _centered_visual_copy_many(sources, "wheel")
+                if not w:
+                    continue
+                ucl = _cyl("UCL_VC_wheel00", radius * 0.98, 0.28, 16)  # rubber VehicleComplex
+                _apply_vehicle_collision_materials(ucl)
+                _ensure_mesh_uvs(ucl)
+                fg = _wheel_firegeo("UTM_FG_Wheel_L01", radius, radius * 0.48, 0.30, 24)
+                _ensure_mesh_uvs(w)
+                suffix = "" if slot == "Wheel" else f"_{slot}"
+                paths = [os.path.join(EXPORT_ROOT, "VehParts", f"{ASSET_NAME}_Wheel{suffix}.fbx")]
+                if slot == "Front":
+                    # Backward-compatible default wheel slot for prefab templates.
+                    paths.append(os.path.join(EXPORT_ROOT, "VehParts", f"{ASSET_NAME}_Wheel.fbx"))
+                for path in paths:
+                    done.append(_fbx_export(path, [w, ucl, fg]))
+                for obj in (w, ucl, fg):
+                    bpy.data.objects.remove(obj, do_unlink=True)
 
         # ---- 3) glass: door windows + split body glass (F/R/quarters)
         #      door/trunk panes get a 'snap_glass' empty at the door hinge:
         #      base-prefab slots use PivotID v_door_xx + ChildPivotID snap_glass
-        GLASS_DOOR = {"door_FL_window": ("FL", "door_FL"), "door_FR_window": ("FR", "door_FR"),
-                      "door_RL_window": ("RL", "door_RL"), "door_RR_window": ("RR", "door_RR"),
-                      "door_trunk_window": ("R", "door_trunk"),
-                      "glass_windshield": ("F", None)}
-        for dn, (tag, door) in GLASS_DOOR.items() if context.scene.rpf_export_dst_glass else ():
-            src = bpy.data.objects.get(dn)
-            if not src:
-                continue
-            g = _bare_copy(src, f"Glass_{tag}")
-            extras = [g]
+        glass_slots = (
+            ("F", None, ("glass_windshield", "windshield", "windscreen", "window_F", "windows_front")),
+            ("FL", "door_FL", ("window_FL", "door_FL_window", "glass_FL")),
+            ("FR", "door_FR", ("window_FR", "door_FR_window", "glass_FR")),
+            ("RL", "door_RL", ("window_RL", "door_RL_window", "glass_RL")),
+            ("RR", "door_RR", ("window_RR", "door_RR_window", "glass_RR")),
+            ("R", "door_trunk", ("window_trunk", "door_trunk_window", "glass_rear", "rear_window")),
+        )
+
+        def _is_export_render_mesh(obj):
+            if not obj or obj.type != 'MESH':
+                return False
+            if obj.name.startswith(COLLIDER_PFX) or obj.get("usage"):
+                return False
+            if _is_wheel_part(obj.name) or _is_wheel_part(part_of(obj) or ""):
+                return False
+            return True
+
+        def _objects_in_named_collections(names):
+            wanted = {name.lower() for name in names}
+            out, seen = [], set()
+            for collection in bpy.data.collections:
+                if collection.name.lower() not in wanted:
+                    continue
+                for obj in collection.objects:
+                    if _is_export_render_mesh(obj) and obj.name not in seen:
+                        out.append(obj)
+                        seen.add(obj.name)
+            return out
+
+        def _find_glass_slot_sources(names):
+            found, seen = [], set()
+            for obj in _objects_in_named_collections(names):
+                found.append(obj)
+                seen.add(obj.name)
+            for source_name in names:
+                obj = bpy.data.objects.get(source_name)
+                if _is_export_render_mesh(obj) and obj.name not in seen:
+                    found.append(obj)
+                    seen.add(obj.name)
+            wanted = {name.lower() for name in names}
+            for obj in context.scene.objects:
+                if not _is_export_render_mesh(obj) or obj.name in seen:
+                    continue
+                base = obj.name.split(".", 1)[0].lower()
+                part = (part_of(obj) or "").lower()
+                if base in wanted or part in wanted:
+                    found.append(obj)
+                    seen.add(obj.name)
+            return found
+
+        def _fallback_glass_sources(tag):
+            candidates = [
+                obj for obj in context.scene.objects
+                if _is_export_render_mesh(obj)
+                and (_is_glass_part(obj.name) or _is_glass_part(part_of(obj) or ""))
+            ]
+            if not candidates:
+                return []
+            boxes = [(obj, *wbbox(obj)) for obj in candidates]
+            y_min = min(mn.y for _obj, mn, _mx in boxes)
+            y_max = max(mx.y for _obj, _mn, mx in boxes)
+            y_span = max(y_max - y_min, 1e-6)
+            out = []
+            for obj, mn, mx in boxes:
+                center = (mn + mx) * 0.5
+                if tag == "F" and center.y >= y_max - y_span * 0.28:
+                    out.append(obj)
+                elif tag == "R" and center.y <= y_min + y_span * 0.28:
+                    out.append(obj)
+                elif tag in {"FL", "RL"} and center.x < 0:
+                    out.append(obj)
+                elif tag in {"FR", "RR"} and center.x >= 0:
+                    out.append(obj)
+            return out
+
+        def _light_sources_for(names, tag):
+            sources, seen = [], set()
+            for obj in _objects_in_named_collections(names):
+                sources.append(obj)
+                seen.add(obj.name)
+            wanted = {name.lower() for name in names}
+            for obj in context.scene.objects:
+                if not _is_export_render_mesh(obj) or obj.name in seen:
+                    continue
+                base = obj.name.split(".", 1)[0].lower()
+                part = (part_of(obj) or "").lower()
+                if base in wanted or part in wanted:
+                    sources.append(obj)
+                    seen.add(obj.name)
+            if sources:
+                return sources
+            candidates = [
+                obj for obj in context.scene.objects
+                if _is_export_render_mesh(obj)
+                and (_is_light_part(obj.name) or _is_light_part(part_of(obj) or ""))
+            ]
+            if not candidates:
+                return []
+            all_render = [obj for obj in context.scene.objects if _is_export_render_mesh(obj)]
+            if not all_render:
+                return []
+            vehicle_y_mid = sum((wbbox(obj)[0].y + wbbox(obj)[1].y) * 0.5 for obj in all_render) / len(all_render)
+            want_front = tag == "Front"
+            return [
+                obj for obj in candidates
+                if (((wbbox(obj)[0].y + wbbox(obj)[1].y) * 0.5) >= vehicle_y_mid) == want_front
+            ]
+
+        def _export_dst_glass(tag, sources, door=None):
+            if not sources:
+                return False
+            g = _join_bare_copies(sources, f"Glass_{tag}")
+            collision = _join_bare_copies(sources, "UTM_Glass")
+            if not g or not collision:
+                for obj in (g, collision):
+                    if obj and obj.name in bpy.data.objects:
+                        bpy.data.objects.remove(obj, do_unlink=True)
+                return False
+            _ensure_mesh_uvs(g)
+            _apply_vehicle_collision_materials(collision)
+            _ensure_mesh_uvs(collision)
+            extras = [g, collision]
             hinge = door_hinge(door) if door else None
             if hinge:
                 snap = bpy.data.objects.new("snap_glass", None)
@@ -2806,17 +4725,170 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
                 bpy.context.scene.collection.objects.link(snap)
                 extras.append(snap)
             done.append(_fbx_export(os.path.join(EXPORT_ROOT, "Dst", f"{ASSET_NAME}_Glass_{tag}.fbx"), extras))
-            for e in extras:
-                bpy.data.objects.remove(e)
+            for obj in extras:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            return True
+
+        for tag, door, names in glass_slots if context.scene.rpf_export_dst_glass else ():
+            sources = _find_glass_slot_sources(names) or _fallback_glass_sources(tag)
+            _export_dst_glass(tag, sources, door)
+        if context.scene.rpf_export_dst_glass:
+            light_glass_jobs = (
+                ("Light_FL", ("lights_front",), "Front", "L"),
+                ("Light_FR", ("lights_front",), "Front", "R"),
+                ("Light_RL", ("lights_rear",), "Rear", "L"),
+                ("Light_RR", ("lights_rear",), "Rear", "R"),
+            )
+            for tag, names, light_tag, side in light_glass_jobs:
+                temp_sources = []
+                for source in _light_sources_for(names, light_tag):
+                    copy = _copy_face_subset(
+                        source,
+                        f"_rpf_{tag}_{source.name}",
+                        GLASS_FACE_MAT_TOKENS,
+                        side=side,
+                        include_matching=True,
+                    )
+                    if copy:
+                        temp_sources.append(copy)
+                try:
+                    _export_dst_glass(tag, temp_sources)
+                finally:
+                    for obj in temp_sources:
+                        if obj.name in bpy.data.objects:
+                            bpy.data.objects.remove(obj, do_unlink=True)
         # quarters + partition glass stay in the body (no stock slots for them);
-        # standard light lenses stay in the body — base-prefab VehicleLight
-        # components at v_light_* pivots provide the actual illumination
+        # base-prefab VehicleLight components at v_light_* pivots provide the
+        # actual illumination. Optional light-slot FBXs are still useful for
+        # vehicles that carry replaceable/slot-owned lens meshes.
+        if context.scene.rpf_export_light_slots:
+            light_jobs = (
+                ("Front", ("lights_front",)),
+                ("Rear", ("lights_rear",)),
+            )
+            for tag, names in light_jobs:
+                sources = _light_sources_for(names, tag)
+                if not sources:
+                    continue
+                lens = _centered_visual_copy_many(sources, f"Light_{tag}")
+                if not lens:
+                    continue
+                _ensure_mesh_uvs(lens)
+                done.append(_fbx_export(
+                    os.path.join(EXPORT_ROOT, "Lights", f"{ASSET_NAME}_Lights_{tag}.fbx"),
+                    [lens],
+                ))
+                bpy.data.objects.remove(lens, do_unlink=True)
 
         self.report({'INFO'}, f"exported {len(done)} FBX files to {EXPORT_ROOT}")
         _write_export_identity(EXPORT_ROOT, ASSET_NAME)
         print("ENFUSION EXPORT SET:")
         for d in done:
             print("  ", d)
+        if context.scene.rpf_open_web_after_export:
+            try:
+                url = _open_rvc_web_helper(context)
+                self.report({'INFO'}, f"exported {len(done)} FBX files; web helper opened: {url}")
+            except Exception as exc:
+                self.report({'WARNING'}, f"exported {len(done)} FBX files; web helper failed: {exc}")
+        return {'FINISHED'}
+
+
+class RPF_OT_export_selected_fbx(bpy.types.Operator):
+    bl_idname = "rpf.export_selected_fbx"
+    bl_label = "Export Selected Object(s)"
+    bl_description = "Export the current selected mesh/armature/empty objects as one standalone FBX"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        import os
+        EXPORT_ROOT = context.scene.rpf_export_root
+        ASSET_NAME = context.scene.rpf_asset_name
+        if not EXPORT_ROOT:
+            self.report({'ERROR'}, "set an Export Directory first")
+            return {'CANCELLED'}
+        identity_error = _export_identity_error(EXPORT_ROOT, ASSET_NAME)
+        if identity_error:
+            self.report({'ERROR'}, identity_error)
+            return {'CANCELLED'}
+        selected = [
+            obj for obj in context.selected_objects
+            if obj.type in {'MESH', 'ARMATURE', 'EMPTY'} and obj.name in context.scene.objects
+        ]
+        if not selected:
+            self.report({'ERROR'}, "select at least one mesh, armature, or memory empty")
+            return {'CANCELLED'}
+        if len(selected) == 1:
+            name = _safe_name_token(selected[0].name)
+        else:
+            name = f"{_safe_name_token(ASSET_NAME)}_Selected_{len(selected)}"
+        path = os.path.join(EXPORT_ROOT, "Selected", f"{name}.fbx")
+        _fbx_export(path, selected)
+        self.report({'INFO'}, f"exported selected FBX: {path}")
+        print("RPF SELECTED EXPORT:", path)
+        return {'FINISHED'}
+
+
+def _guess_addon_root_from_export(export_root):
+    from pathlib import Path
+    root = Path(bpy.path.abspath(export_root)).resolve()
+    start = root if root.is_dir() else root.parent
+    for candidate in (start, *start.parents):
+        try:
+            if any(candidate.glob("*.gproj")):
+                return str(candidate)
+        except OSError:
+            pass
+    parts = list(start.parts)
+    if "Assets" in parts:
+        return str(Path(*parts[:parts.index("Assets")]))
+    return str(start)
+
+
+def _rvc_web_query(context):
+    from urllib.parse import urlencode
+    sc = context.scene
+    export_root = bpy.path.abspath(sc.rpf_export_root)
+    params = {
+        "addon_root": _guess_addon_root_from_export(export_root),
+        "asset_name": sc.rpf_asset_name,
+        "output_directory": export_root,
+        "source_blend": bpy.data.filepath,
+        "template": "SampleCar",
+        "wheelbase": f"{sc.rpf_wheelbase:.3f}",
+        "wheel_radius": f"{sc.rpf_wheel_radius:.3f}",
+    }
+    return urlencode({k: v for k, v in params.items() if v})
+
+
+def _open_rvc_web_helper(context):
+    import webbrowser
+    try:
+        from .rvc_web import app as web_app
+    except Exception:
+        import importlib
+        # Use this module's actual package name (under Blender 4.5 that is
+        # bl_ext.<repo>.reforger_vehicle_checker, NOT a bare 'reforger_vehicle_checker').
+        web_app = importlib.import_module(__package__ + ".rvc_web.app")
+    web_app.serve_in_thread(open_browser=False)
+    url = f"http://127.0.0.1:{web_app.PORT}/?{_rvc_web_query(context)}"
+    webbrowser.open(url)
+    return url
+
+
+class RPF_OT_open_build_import_web_tool(bpy.types.Operator):
+    bl_idname = "rpf.open_build_import_web_tool"
+    bl_label = "Open Build / Import Web Tool"
+    bl_description = "Open the local post-export vehicle setup helper with this vehicle's current export settings prefilled"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            url = _open_rvc_web_helper(context)
+        except Exception as exc:
+            self.report({'ERROR'}, f"web helper failed: {exc}")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Build/Import web tool at {url}")
         return {'FINISHED'}
 
 
@@ -2915,6 +4987,7 @@ class RPF_OT_export_em_lamps(bpy.types.Operator):
             lamp.data.materials.append(_em_side_material(side))
             # origin at the socket: shift world so socket -> (0,0,0)
             lamp.matrix_world = Matrix.Translation(-sp) @ lamp.matrix_world
+            _ensure_mesh_uvs(lamp)
             p = _fbx_export(
                 os.path.join(EXPORT_ROOT, "Lights", "Lamps", f"{ASSET_NAME}_EM_{tag}.fbx"),
                 [lamp])
@@ -2987,6 +5060,80 @@ def _get_armature():
         if o.type == 'ARMATURE':
             return o
     return None
+
+
+def _vehicle_center_x():
+    """Stable mirror plane. Door pairs win; bbox is fallback."""
+    def _part_center_x(part):
+        objs = [o for o in part_objects(part) if o.type == 'MESH']
+        if not objs:
+            obj = bpy.data.objects.get(part)
+            objs = [obj] if obj and obj.type == 'MESH' else []
+        if not objs:
+            return None
+        mn = min(wbbox(o)[0].x for o in objs)
+        mx = max(wbbox(o)[1].x for o in objs)
+        return (mn + mx) * 0.5
+
+    for left, right in (("door_FL", "door_FR"), ("door_RL", "door_RR")):
+        lx = _part_center_x(left)
+        rx = _part_center_x(right)
+        if lx is not None and rx is not None:
+            return (lx + rx) * 0.5
+
+    meshes = [o for o in all_meshes() if not o.name.startswith(COLLIDER_PFX)]
+    if not meshes:
+        return 0.0
+    mn = min(wbbox(o)[0].x for o in meshes)
+    mx = max(wbbox(o)[1].x for o in meshes)
+    return (mn + mx) * 0.5
+
+
+def _mirror_point_x(point, center_x=None):
+    p = Vector(point)
+    cx = _vehicle_center_x() if center_x is None else center_x
+    p.x = (2.0 * cx) - p.x
+    return p
+
+
+def _mirror_name_lr(name, direction):
+    """Return counterpart name for common vehicle bone/socket naming."""
+    if direction == 'RIGHT_TO_LEFT':
+        left_markers = ("_FL", "_RL", "_left", "left", "passengerl", "l01", "l02")
+        if (any(marker in name for marker in left_markers)
+                or name.endswith(("_L", "_l")) or "_L_" in name or "_l_" in name
+                or name.startswith("driver")):
+            return ""
+    elif direction == 'LEFT_TO_RIGHT':
+        right_markers = ("_FR", "_RR", "_right", "right", "passengerr", "r01", "r02")
+        if (any(marker in name for marker in right_markers)
+                or name.endswith(("_R", "_r")) or "_R_" in name or "_r_" in name
+                or name.startswith("codriver")):
+            return ""
+    replacements = []
+    if direction == 'RIGHT_TO_LEFT':
+        replacements = [
+            ("_FR", "_FL"), ("_RR", "_RL"), ("_R", "_L"), ("_r", "_l"),
+            ("_right", "_left"), ("right", "left"), ("codriver", "driver"),
+            ("passengerr", "passengerl"), ("r01", "l01"), ("r02", "l02"),
+        ]
+    elif direction == 'LEFT_TO_RIGHT':
+        replacements = [
+            ("_FL", "_FR"), ("_RL", "_RR"), ("_L", "_R"), ("_l", "_r"),
+            ("_left", "_right"), ("left", "right"), ("driver", "codriver"),
+            ("passengerl", "passengerr"), ("l01", "r01"), ("l02", "r02"),
+        ]
+    for old, new in replacements:
+        if old in name:
+            return name.replace(old, new, 1)
+    return ""
+
+
+def _copy_empty_display(src, dst):
+    dst.empty_display_type = src.empty_display_type
+    dst.empty_display_size = src.empty_display_size
+    dst.rotation_euler = src.rotation_euler.copy()
+    dst.scale = src.scale.copy()
 
 
 class RPF_OT_build_rig(bpy.types.Operator):
@@ -3089,6 +5236,103 @@ class RPF_OT_build_rig(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RPF_OT_mirror_door_bones(bpy.types.Operator):
+    bl_idname = "rpf.mirror_door_bones"
+    bl_label = "Mirror Door Bones"
+    bl_description = ("Mirror side door bones across the vehicle centerline. Use R->L "
+                      "when the right door works and the left door snapped to a bad "
+                      "fallback position; use L->R for the opposite")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: bpy.props.EnumProperty(
+        name="Direction",
+        default='RIGHT_TO_LEFT',
+        items=[
+            ('RIGHT_TO_LEFT', "R -> L", "Copy right-side door bone positions to mirrored left-side bones"),
+            ('LEFT_TO_RIGHT', "L -> R", "Copy left-side door bone positions to mirrored right-side bones"),
+            ('BOTH_FROM_MESH', "From Mesh Hinges", "Place all door bones from the current door mesh hinge/origin positions"),
+        ],
+    )
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm:
+            self.report({'ERROR'}, "no armature - run Build Bones first")
+            return {'CANCELLED'}
+        checkpoint("pre_mirror_door_bones")
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        arm.hide_set(False)
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode='EDIT')
+        eb = arm.data.edit_bones
+        center_x = _vehicle_center_x()
+        made = []
+
+        def parent_name(src_bone):
+            return src_bone.parent.name if src_bone.parent else "v_body"
+
+        def ensure_bone(name, src=None):
+            bone = eb.get(name)
+            if bone:
+                return bone
+            bone = eb.new(name)
+            if src:
+                bone.head = src.head.copy()
+                bone.tail = src.tail.copy()
+                bone.roll = src.roll
+                parent = eb.get(parent_name(src))
+                if parent:
+                    bone.parent = parent
+            else:
+                parent = eb.get("v_body")
+                if parent:
+                    bone.parent = parent
+            return bone
+
+        def mirror_pair(src_name, dst_name):
+            src = eb.get(src_name)
+            if not src:
+                return
+            dst = ensure_bone(dst_name, src)
+            dst.head = arm.matrix_world.inverted() @ _mirror_point_x(arm.matrix_world @ src.head, center_x)
+            dst.tail = arm.matrix_world.inverted() @ _mirror_point_x(arm.matrix_world @ src.tail, center_x)
+            dst.roll = src.roll
+            parent = eb.get(parent_name(src))
+            if parent:
+                dst.parent = parent
+            made.append(f"{src_name}->{dst_name}")
+
+        if self.direction == 'RIGHT_TO_LEFT':
+            mirror_pair("v_door_r01", "v_door_l01")
+            mirror_pair("v_door_r02", "v_door_l02")
+        elif self.direction == 'LEFT_TO_RIGHT':
+            mirror_pair("v_door_l01", "v_door_r01")
+            mirror_pair("v_door_l02", "v_door_r02")
+        else:
+            for door, bone_name in DOOR_BONE.items():
+                hinge = _obj_origin(door) or door_hinge(door)
+                if hinge is None:
+                    continue
+                bone = ensure_bone(bone_name)
+                head = arm.matrix_world.inverted() @ hinge
+                bone.head = head
+                bone.tail = head + Vector((0, BONE_TAIL, 0))
+                bone.roll = 0.0
+                parent = eb.get("v_body")
+                if parent:
+                    bone.parent = parent
+                made.append(f"{door}->{bone_name}")
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.report(
+            {'INFO'} if made else {'WARNING'},
+            f"mirrored/placed {len(made)} door bones around X={center_x:.4f}: {', '.join(made) or 'none'}",
+        )
+        return {'FINISHED'} if made else {'CANCELLED'}
+
+
 class RPF_OT_recenter(bpy.types.Operator):
     bl_idname = "rpf.recenter"
     bl_label = "Re-Center Vehicle + Rig"
@@ -3176,13 +5420,92 @@ class RPF_OT_recenter(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _is_steering_mesh_name(name):
+    return is_steering_name(name)
+
+
+def _manual_rig_props(obj):
+    if not obj:
+        return "", "", ""
+    return (
+        str(obj.get("rpf_rig_role", "")),
+        str(obj.get("rpf_slot", "")),
+        str(obj.get("rpf_target_bone", "")),
+    )
+
+
+def _rig_role_for_obj(obj):
+    role, slot, target = _manual_rig_props(obj)
+    if target or role:
+        return resolve_target_bone(obj.name, role, slot, target)
+    return resolve_target_bone(obj.name)
+
+
+_RIG_BODY_LIKE_ROLES = {"BODY", "INTERIOR", "LIGHT", "GLASS"}
+
+
+def _binding_target_for_obj(context, obj):
+    """Resolve the bone a bind action should write.
+
+    Manual object props are authoritative. If the object name already resolves
+    to a moving vehicle role, keep that. If the name only falls back to body-like
+    roles, use the currently selected UI role/slot so generic meshes can be
+    bound as rotators, suspension parts, doors, etc. without renaming first.
+    """
+    manual_role, manual_slot, manual_target = _manual_rig_props(obj)
+    if manual_target or manual_role:
+        return resolve_target_bone(obj.name, manual_role, manual_slot, manual_target)
+
+    guessed_role, guessed_slot, guessed_target = resolve_target_bone(obj.name)
+    scene_role = context.scene.rpf_rig_role
+    scene_slot = context.scene.rpf_rig_slot
+    scene_custom = context.scene.rpf_rig_custom_bone.strip()
+    scene_target = target_bone_for_role(scene_role, scene_slot, scene_custom)
+    if guessed_role in _RIG_BODY_LIKE_ROLES and scene_target:
+        return scene_role, scene_slot, scene_target
+    return guessed_role, guessed_slot, guessed_target
+
+
+def _bone_world_head(arm, bone_name):
+    if arm and bone_name in arm.data.bones:
+        return arm.matrix_world @ arm.data.bones[bone_name].head_local
+    return None
+
+
+def _selected_mesh_center(context):
+    meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+    if not meshes and context.object and context.object.type == 'MESH':
+        meshes = [context.object]
+    if not meshes:
+        return Vector((0, 0, 0))
+    mn, mx = _combined_bbox(meshes)
+    return (mn + mx) * 0.5
+
+
+def _ensure_armature_modifier(obj, arm):
+    mod = next((m for m in obj.modifiers if m.type == 'ARMATURE'), None)
+    if mod is None:
+        mod = obj.modifiers.new("Armature", 'ARMATURE')
+    mod.object = arm
+    mod.use_vertex_groups = True
+    mod.use_bone_envelopes = False
+    return mod
+
+
 def _skin_bone_for(name):
+    obj = bpy.data.objects.get(name)
+    if obj:
+        _role, _slot, target = _rig_role_for_obj(obj)
+        if target:
+            return target
     if name in DOOR_BONE:
         return DOOR_BONE[name]
     if name.endswith("_window") and name[:-7] in DOOR_BONE:
         return DOOR_BONE[name[:-7]]
     if name in WHEEL_BONES:
         return WHEEL_BONES[name][0]
+    if _is_steering_mesh_name(name):
+        return "v_steering_wheel"
     return {"brake_FL": "v_rotator_l01", "brake_FR": "v_rotator_r01",
             "brake_RL": "v_suspension_l02", "brake_RR": "v_suspension_r02",
             "Steering_Wheel": "v_steering_wheel", "Pedal_Brake": "v_pedal_brake",
@@ -3218,32 +5541,66 @@ def _rigid_bind(o, arm, bone_name):
     return True
 
 
+def _is_skin_target_name(name):
+    targets = set(PART_ORDER) | {d + "_window" for d in DOORS} \
+        | {"glass_windshield", "glass_quarters", "glass_partition"}
+    obj = bpy.data.objects.get(name)
+    return name in targets or _is_steering_mesh_name(name) or bool(obj and obj.get("rpf_target_bone"))
+
+
+def _weighted_vertex_count(o, bone_name):
+    group = o.vertex_groups.get(bone_name)
+    if not group:
+        return 0
+    count = 0
+    for vertex in o.data.vertices:
+        try:
+            if group.weight(vertex.index) > 0.0:
+                count += 1
+        except RuntimeError:
+            pass
+    return count
+
+
+def _rig_check_objects():
+    movable = set(DOORS) | set(WHEEL_BONES) | {
+        "brake_FL", "brake_FR", "brake_RL", "brake_RR",
+        "Steering_Wheel", "Pedal_Brake", "Pedal_Accelerator",
+    }
+    objects, seen = [], set()
+    for name in sorted(movable):
+        obj = bpy.data.objects.get(name)
+        if obj and obj.type == 'MESH' and obj.name not in seen:
+            objects.append(obj)
+            seen.add(obj.name)
+    for obj in all_meshes():
+        if obj.name in seen or obj.name.startswith(COLLIDER_PFX):
+            continue
+        if _is_steering_mesh_name(obj.name) or obj.get("rpf_target_bone"):
+            objects.append(obj)
+            seen.add(obj.name)
+    return objects
+
+
 def _rig_binding_issues(arm):
     """Return export-blocking movable-part binding problems.
 
     Wheels are optional: a missing mesh is never an issue.
     """
-    movable = set(DOORS) | set(WHEEL_BONES) | {
-        "brake_FL", "brake_FR", "brake_RL", "brake_RR",
-        "Steering_Wheel", "Pedal_Brake", "Pedal_Accelerator",
-    }
     issues = []
-    for name in sorted(movable):
-        o = bpy.data.objects.get(name)
-        if not o or o.type != 'MESH':
-            continue
-        bone_name = _skin_bone_for(name)
+    for o in _rig_check_objects():
+        bone_name = _skin_bone_for(o.name)
         if bone_name not in arm.data.bones:
-            issues.append(f"{name}: missing bone {bone_name}")
+            issues.append(f"{o.name}: missing bone {bone_name}")
             continue
-        if not o.vertex_groups.get(bone_name):
-            issues.append(f"{name}: not weighted to {bone_name}")
+        if _weighted_vertex_count(o, bone_name) < len(o.data.vertices):
+            issues.append(f"{o.name}: not fully weighted to {bone_name}")
         if not any(m.type == 'ARMATURE' and m.object == arm for m in o.modifiers):
-            issues.append(f"{name}: missing Armature modifier")
+            issues.append(f"{o.name}: missing Armature modifier")
         if o.parent != arm:
-            issues.append(f"{name}: not parented to {arm.name}")
+            issues.append(f"{o.name}: not parented to {arm.name}")
         elif o.parent_type != 'OBJECT':
-            issues.append(f"{name}: bone-parented and armature-skinned (double transform)")
+            issues.append(f"{o.name}: bone-parented and armature-skinned (double transform)")
     return issues
 
 
@@ -3263,11 +5620,9 @@ class RPF_OT_skin_parts(bpy.types.Operator):
             self.report({'ERROR'}, "no armature — run Build Bones first")
             return {'CANCELLED'}
         bpy.ops.rpf.doors_close()
-        targets = set(PART_ORDER) | {d + "_window" for d in DOORS} \
-            | {"glass_windshield", "glass_quarters", "glass_partition"}
         done, missing, skipped = {}, [], 0
         for o in all_meshes():
-            if o.name not in targets:
+            if not _is_skin_target_name(o.name):
                 if not o.name.startswith(COLLIDER_PFX):
                     skipped += 1
                 continue
@@ -3284,10 +5639,260 @@ class RPF_OT_skin_parts(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RPF_OT_assign_rig_role(bpy.types.Operator):
+    bl_idname = "rpf.assign_rig_role"
+    bl_label = "Assign Selected Object To Bone"
+    bl_description = "Mark selected mesh objects with the chosen rig role/slot/bone. Manual assignment overrides name guessing"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        role = context.scene.rpf_rig_role
+        slot = context.scene.rpf_rig_slot
+        custom = context.scene.rpf_rig_custom_bone.strip()
+        target = target_bone_for_role(role, slot, custom)
+        if not target:
+            self.report({'ERROR'}, "choose a rig role/slot or custom bone")
+            return {'CANCELLED'}
+        meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not meshes and context.object and context.object.type == 'MESH':
+            meshes = [context.object]
+        if not meshes:
+            self.report({'ERROR'}, "select one or more mesh objects")
+            return {'CANCELLED'}
+        for obj in meshes:
+            obj["rpf_rig_role"] = role
+            obj["rpf_slot"] = slot
+            obj["rpf_target_bone"] = target
+        context.scene.rpf_rig_custom_bone = target
+        self.report({'INFO'}, f"assigned {len(meshes)} object(s) to {target}")
+        return {'FINISHED'}
+
+
+class RPF_OT_rename_to_rig_role(bpy.types.Operator):
+    bl_idname = "rpf.rename_to_rig_role"
+    bl_label = "Rename To Role"
+    bl_description = "Rename selected objects to the current rig role and slot without changing their geometry"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        role = context.scene.rpf_rig_role
+        slot = context.scene.rpf_rig_slot
+        names = {
+            "STEERING": "Steering_Wheel",
+            "HANDBRAKE": "Handbrake",
+            "PEDAL_BRAKE": "Pedal_Brake",
+            "PEDAL_THROTTLE": "Pedal_Accelerator",
+            "BODY": "body",
+            "INTERIOR": "interior",
+            "LIGHT": "lights",
+            "GLASS": "glass",
+            "WHEEL": f"wheel_{slot}",
+            "ROTATOR": f"rotator_{slot}",
+            "SUSPENSION": f"suspension_{slot}",
+            "DOOR": "door_trunk" if slot == "TRUNK" else f"door_{slot}",
+            "CUSTOM": context.scene.rpf_rig_custom_bone.strip() or "custom_bone_part",
+        }
+        base = names.get(role, role.lower())
+        meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not meshes:
+            self.report({'ERROR'}, "select mesh objects to rename")
+            return {'CANCELLED'}
+        for index, obj in enumerate(meshes, 1):
+            obj.name = base if len(meshes) == 1 else f"{base}_{index:02d}"
+        self.report({'INFO'}, f"renamed {len(meshes)} object(s) as {base}")
+        return {'FINISHED'}
+
+
+class RPF_OT_create_missing_rig_bone(bpy.types.Operator):
+    bl_idname = "rpf.create_missing_rig_bone"
+    bl_label = "Create Missing Bone"
+    bl_description = "Create the selected role's SampleCar-style bone at the selected mesh center if it is missing"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm:
+            self.report({'ERROR'}, "no armature - run Build Bones first")
+            return {'CANCELLED'}
+        role = context.scene.rpf_rig_role
+        slot = context.scene.rpf_rig_slot
+        custom = context.scene.rpf_rig_custom_bone.strip()
+        bone_name = target_bone_for_role(role, slot, custom)
+        if not bone_name:
+            self.report({'ERROR'}, "choose a target bone")
+            return {'CANCELLED'}
+        if bone_name in arm.data.bones:
+            self.report({'INFO'}, f"{bone_name} already exists")
+            return {'FINISHED'}
+        parent_name = SAMPLECAR_PARENT.get(bone_name, "v_body")
+        head_world = _selected_mesh_center(context)
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        arm.hide_set(False)
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode='EDIT')
+        eb = arm.data.edit_bones
+        parent = eb.get(parent_name) or eb.get("v_body") or eb.get("v_root")
+        bone = eb.new(bone_name)
+        bone.head = arm.matrix_world.inverted() @ head_world
+        axis = STEER_DIR if bone_name == "v_steering_wheel" else Vector((0, 1, 0))
+        bone.tail = bone.head + axis.normalized() * BONE_TAIL
+        bone.roll = 0.0
+        if parent:
+            bone.parent = parent
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.report({'INFO'}, f"created {bone_name} parented to {parent.name if parent else 'none'}")
+        return {'FINISHED'}
+
+
+class RPF_OT_bind_selected_to_rig_bone(bpy.types.Operator):
+    bl_idname = "rpf.bind_selected_to_rig_bone"
+    bl_label = "Bind Whole Object 100%"
+    bl_description = "Rigid-bind selected mesh objects to their manual target bone, or to the role resolver's guessed bone"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm:
+            self.report({'ERROR'}, "no armature - run Build Bones first")
+            return {'CANCELLED'}
+        meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not meshes and context.object and context.object.type == 'MESH':
+            meshes = [context.object]
+        if not meshes:
+            self.report({'ERROR'}, "select mesh objects to bind")
+            return {'CANCELLED'}
+        done, missing = [], []
+        for obj in meshes:
+            role, slot, bone_name = _binding_target_for_obj(context, obj)
+            if not bone_name or bone_name not in arm.data.bones:
+                missing.append(f"{obj.name}->{bone_name or '?'}")
+                continue
+            obj["rpf_rig_role"] = role
+            obj["rpf_slot"] = slot
+            obj["rpf_target_bone"] = bone_name
+            _rigid_bind(obj, arm, bone_name)
+            done.append(f"{obj.name}->{bone_name}")
+        if missing:
+            self.report({'WARNING'}, f"bound {len(done)}; missing bones: {', '.join(missing)}")
+        else:
+            self.report({'INFO'}, f"bound {len(done)} object(s): {', '.join(done[:4])}")
+        return {'FINISHED'} if done else {'CANCELLED'}
+
+
+class RPF_OT_bind_edit_selection_to_rig_bone(bpy.types.Operator):
+    bl_idname = "rpf.bind_edit_selection_to_rig_bone"
+    bl_label = "Bind Edit Selection 100%"
+    bl_description = "In Edit Mode, set selected vertices/faces to weight 1.0 on the chosen bone without rebaking object transforms"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = _get_armature()
+        obj = context.object
+        if not arm or not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "select a mesh and ensure the armature exists")
+            return {'CANCELLED'}
+        role, slot, bone_name = _binding_target_for_obj(context, obj)
+        if not bone_name or bone_name not in arm.data.bones:
+            self.report({'ERROR'}, f"missing target bone {bone_name or '?'}")
+            return {'CANCELLED'}
+        was_edit = context.mode == 'EDIT_MESH'
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        selected = [v.index for v in obj.data.vertices if v.select]
+        if not selected:
+            self.report({'ERROR'}, "no selected vertices/faces")
+            if was_edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+            return {'CANCELLED'}
+        group = obj.vertex_groups.get(bone_name) or obj.vertex_groups.new(name=bone_name)
+        group.add(selected, 1.0, 'REPLACE')
+        _ensure_armature_modifier(obj, arm)
+        obj.parent = arm
+        obj.parent_type = 'OBJECT'
+        obj.parent_bone = ""
+        obj["rpf_rig_role"] = role or context.scene.rpf_rig_role
+        obj["rpf_slot"] = slot or context.scene.rpf_rig_slot
+        obj["rpf_target_bone"] = bone_name
+        if was_edit:
+            bpy.ops.object.mode_set(mode='EDIT')
+        self.report({'INFO'}, f"weighted {len(selected)} vertices on {obj.name} to {bone_name}")
+        return {'FINISHED'}
+
+
+class RPF_OT_mirror_selected_rig_bone(bpy.types.Operator):
+    bl_idname = "rpf.mirror_selected_rig_bone"
+    bl_label = "Mirror Opposite Bone"
+    bl_description = "Mirror the selected/target bone to its opposite left/right counterpart across the vehicle centerline"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm:
+            self.report({'ERROR'}, "no armature - run Build Bones first")
+            return {'CANCELLED'}
+        bone_name = context.scene.rpf_rig_custom_bone.strip()
+        if not bone_name and context.object and context.object.type == 'MESH':
+            _role, _slot, bone_name = _rig_role_for_obj(context.object)
+        if not bone_name and arm.data.bones.active:
+            bone_name = arm.data.bones.active.name
+        dst_name = opposite_bone_name(bone_name)
+        if not bone_name or not dst_name:
+            self.report({'ERROR'}, "choose a left/right source bone")
+            return {'CANCELLED'}
+        if bone_name not in arm.data.bones:
+            self.report({'ERROR'}, f"source bone {bone_name} missing")
+            return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        arm.hide_set(False)
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode='EDIT')
+        eb = arm.data.edit_bones
+        src = eb.get(bone_name)
+        dst = eb.get(dst_name)
+        if not dst:
+            dst = eb.new(dst_name)
+        center_x = _vehicle_center_x()
+        dst.head = arm.matrix_world.inverted() @ _mirror_point_x(arm.matrix_world @ src.head, center_x)
+        dst.tail = arm.matrix_world.inverted() @ _mirror_point_x(arm.matrix_world @ src.tail, center_x)
+        dst.roll = src.roll
+        parent_name = SAMPLECAR_PARENT.get(dst_name) or (src.parent.name if src.parent else "")
+        parent = eb.get(parent_name)
+        if parent:
+            dst.parent = parent
+        bpy.ops.object.mode_set(mode='OBJECT')
+        self.report({'INFO'}, f"mirrored {bone_name} -> {dst_name}")
+        return {'FINISHED'}
+
+
+class RPF_OT_validate_rig_assignments(bpy.types.Operator):
+    bl_idname = "rpf.validate_rig_assignments"
+    bl_label = "Validate Rig"
+    bl_description = "Check manually assigned/guessed moving parts for missing bones, vertex groups, and armature modifiers"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm:
+            self.report({'ERROR'}, "no armature")
+            return {'CANCELLED'}
+        issues = _rig_binding_issues(arm)
+        if issues:
+            self.report({'WARNING'}, f"{len(issues)} rig issue(s): " + "; ".join(issues[:5]))
+        else:
+            self.report({'INFO'}, "rig assignments valid")
+        return {'FINISHED'}
+
+
 class RPF_OT_select_bone(bpy.types.Operator):
     bl_idname = "rpf.select_bone"
     bl_label = "Select Bone"
-    bl_description = "Pose-select this bone and frame it for review"
+    bl_description = "Edit-select this bone and frame it for review/movement"
     bone: bpy.props.StringProperty()
 
     def execute(self, context):
@@ -3301,13 +5906,14 @@ class RPF_OT_select_bone(bpy.types.Operator):
         arm.hide_set(False)
         arm.select_set(True)
         context.view_layer.objects.active = arm
-        bpy.ops.object.mode_set(mode='POSE')
-        for b in arm.data.bones:
-            b.select = (b.name == self.bone)
-        arm.data.bones.active = arm.data.bones[self.bone]
+        bpy.ops.object.mode_set(mode='EDIT')
+        for b in arm.data.edit_bones:
+            b.select = b.select_head = b.select_tail = (b.name == self.bone)
+        arm.data.edit_bones.active = arm.data.edit_bones[self.bone]
         frame_view(context)
-        h = arm.matrix_world @ arm.data.bones[self.bone].head_local
-        self.report({'INFO'}, f"{self.bone} head at {[round(v, 3) for v in h]}")
+        h = arm.matrix_world @ arm.data.edit_bones[self.bone].head
+        context.scene.rpf_rig_custom_bone = self.bone
+        self.report({'INFO'}, f"editing {self.bone} head at {[round(v, 3) for v in h]}")
         return {'FINISHED'}
 
 
@@ -3546,6 +6152,75 @@ class RPF_OT_add_sockets(bpy.types.Operator):
         ]
         self.report({'INFO'}, f"{len(made)} sockets placed in {SOCKET_COLL} — review + nudge each")
         return {'FINISHED'}
+
+
+class RPF_OT_mirror_memory_points(bpy.types.Operator):
+    bl_idname = "rpf.mirror_memory_points"
+    bl_label = "Mirror Memory Points"
+    bl_description = ("Mirror socket/memory empties across the vehicle centerline. "
+                      "Creates missing opposite-side sockets and preserves display size/type")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: bpy.props.EnumProperty(
+        name="Direction",
+        default='RIGHT_TO_LEFT',
+        items=[
+            ('RIGHT_TO_LEFT', "R -> L", "Copy right-side sockets to mirrored left-side sockets"),
+            ('LEFT_TO_RIGHT', "L -> R", "Copy left-side sockets to mirrored right-side sockets"),
+        ],
+    )
+    selected_only: bpy.props.BoolProperty(
+        name="Selected only",
+        default=False,
+        description="Mirror only selected socket empties; otherwise mirror all known left/right sockets",
+    )
+
+    def execute(self, context):
+        checkpoint("pre_mirror_memory_points")
+        coll = get_coll(SOCKET_COLL)
+        center_x = _vehicle_center_x()
+        if self.selected_only:
+            sources = [
+                obj for obj in context.selected_objects
+                if obj.type == 'EMPTY' and obj.name in bpy.data.objects
+            ]
+        else:
+            sources = [obj for obj in bpy.data.objects if obj.type == 'EMPTY']
+            sources = [
+                obj for obj in sources
+                if obj.name in {socket.name for socket in coll.objects}
+                or obj.name.startswith(("v_light", "driver", "codriver", "passenger"))
+            ]
+        made = []
+        for src in sources:
+            dst_name = _mirror_name_lr(src.name, self.direction)
+            if not dst_name or dst_name == src.name:
+                continue
+            dst = bpy.data.objects.get(dst_name)
+            if dst is None:
+                dst = bpy.data.objects.new(dst_name, None)
+                coll.objects.link(dst)
+            elif dst.name not in {obj.name for obj in coll.objects}:
+                try:
+                    coll.objects.link(dst)
+                except RuntimeError:
+                    pass
+            _copy_empty_display(src, dst)
+            dst.location = _mirror_point_x(src.matrix_world.translation, center_x)
+            dst["rpf_mirrored_from"] = src.name
+            made.append(f"{src.name}->{dst.name}")
+        bpy.ops.object.select_all(action='DESELECT')
+        for pair in made:
+            dst_name = pair.split("->", 1)[1]
+            obj = bpy.data.objects.get(dst_name)
+            if obj:
+                obj.select_set(True)
+        self.report(
+            {'INFO'} if made else {'WARNING'},
+            f"mirrored {len(made)} memory points around X={center_x:.4f}: {', '.join(made[:8])}"
+            + ("..." if len(made) > 8 else ""),
+        )
+        return {'FINISHED'} if made else {'CANCELLED'}
 
 
 LIGHT_MAT_TOKENS = ("light", "lamp", "headl", "taill", "beacon", "strobe")
@@ -3843,6 +6518,64 @@ class RPF_OT_bake_lod(bpy.types.Operator):
 # panel
 # ----------------------------------------------------------------------------
 
+COLLISION_REVIEW_MODES = (
+    ('MODEL', "Model"),
+    ('UCX', "UCX"),
+    ('FIRE', "FireGeo"),
+    ('GLASS', "Glass"),
+    ('WHEELS', "All Wheel"),
+    ('ALL', "All"),
+)
+
+WHEEL_REVIEW_MODES = (
+    ('WHEEL_VC', "VehicleComplex"),
+    ('WHEEL_FG', "Wheel FireGeo"),
+    ('WHEEL_MT', "MineTrigger"),
+)
+
+
+def _draw_accordion(layout, scene, prop_name, title, icon='NONE'):
+    box = layout.box()
+    expanded = bool(getattr(scene, prop_name, True))
+    row = box.row(align=True)
+    row.prop(
+        scene,
+        prop_name,
+        text=title,
+        icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
+        emboss=False,
+    )
+    if icon != 'NONE':
+        row.label(text="", icon=icon)
+    return box if expanded else None
+
+
+def _draw_collision_review_controls(layout, scene):
+    active_mode = scene.get("rpf_collision_view", "MODEL")
+    row = layout.row(align=True)
+    for mode, label in COLLISION_REVIEW_MODES:
+        op = row.operator("rpf.collision_view", text=label, depress=(active_mode == mode))
+        op.mode = mode
+    row = layout.row(align=True)
+    for mode, label in WHEEL_REVIEW_MODES:
+        op = row.operator("rpf.collision_view", text=label, depress=(active_mode == mode))
+        op.mode = mode
+    row = layout.row(align=True)
+    for axis, label in (('LEFT', "L"), ('RIGHT', "R"), ('FRONT', "F"),
+                        ('BACK', "B"), ('TOP', "Top")):
+        op = row.operator("rpf.view_axis", text=label)
+        op.axis = axis
+    layout.operator("rpf.sort_collapse", icon='OUTLINER_COLLECTION')
+    selected = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH' and obj.name.startswith(COLLIDER_PFX)]
+    if selected:
+        obj = selected[0]
+        usage = obj.get("usage", _collider_usage(obj.name))
+        surfaces = obj.get("rpf_surface_properties", "")
+        layout.label(text=f"{obj.name}: {usage}", icon='MATERIAL')
+        if surfaces:
+            layout.label(text=surfaces.split("|")[0][:96], icon='INFO')
+
+
 class RPF_PT_panel(bpy.types.Panel):
     bl_label = "Reforger Part Fixer"
     bl_space_type = 'VIEW_3D'
@@ -3913,28 +6646,76 @@ class RPF_PT_panel(bpy.types.Panel):
         elif tab == 'RIG':
             l.operator("rpf.recenter", icon='ORIENTATION_GLOBAL')
             l.operator("rpf.build_rig", icon='ARMATURE_DATA')
-            l.operator("rpf.skin_parts", icon='MOD_VERTEX_WEIGHT')
-            box = l.box()
-            box.label(text="Wheel Placement", icon='GIZMO')
-            box.operator("rpf.wheel_targets", icon='SPHERE')
-            box.prop(sc, "rpf_mirror_x", text="Mirror X (L/R symmetric)")
-            row = box.row(align=True)
-            row.operator("rpf.apply_wheel_targets", icon='CHECKMARK')
-            row.operator("rpf.clear_wheel_targets", text="", icon='X')
+            box = _draw_accordion(l, sc, "rpf_ui_rig_assignment", "Rig Assignment / Binding", 'GROUP_VERTEX')
+            if box:
+                obj = context.object if context.object and context.object.type == 'MESH' else None
+                if obj:
+                    role, slot, target = _rig_role_for_obj(obj)
+                    box.label(text=f"active: {obj.name} -> {target or 'unresolved'}", icon='OBJECT_DATA')
+                    if role:
+                        box.label(text=f"role: {role}{(' ' + slot) if slot else ''}", icon='INFO')
+                row = box.row(align=True)
+                row.prop(sc, "rpf_rig_role", text="Role")
+                row.prop(sc, "rpf_rig_slot", text="Slot")
+                box.prop(sc, "rpf_rig_custom_bone", text="Bone")
+                row = box.row(align=True)
+                row.operator("rpf.assign_rig_role", icon='BONE_DATA')
+                row.operator("rpf.rename_to_rig_role", text="Rename To Role", icon='SORTALPHA')
+                row = box.row(align=True)
+                row.operator("rpf.create_missing_rig_bone", icon='ADD')
+                row.operator("rpf.mirror_selected_rig_bone", icon='MOD_MIRROR')
+                row = box.row(align=True)
+                row.operator("rpf.bind_selected_to_rig_bone", icon='MOD_VERTEX_WEIGHT')
+                row.operator("rpf.bind_edit_selection_to_rig_bone", text="Bind Edit Selection 100%", icon='FACESEL')
+                box.operator("rpf.validate_rig_assignments", icon='CHECKMARK')
+            box = _draw_accordion(l, sc, "rpf_ui_rig_door_repair", "Door Bone Repair", 'BONE_DATA')
+            if box:
+                row = box.row(align=True)
+                op = row.operator("rpf.mirror_door_bones", text="Mirror R -> L")
+                op.direction = 'RIGHT_TO_LEFT'
+                op = row.operator("rpf.mirror_door_bones", text="Mirror L -> R")
+                op.direction = 'LEFT_TO_RIGHT'
+                op = box.operator("rpf.mirror_door_bones", text="Place Door Bones From Mesh Hinges")
+                op.direction = 'BOTH_FROM_MESH'
+                box.operator("rpf.skin_parts", icon='MOD_VERTEX_WEIGHT')
+            box = _draw_accordion(l, sc, "rpf_ui_rig_wheel_placement", "Wheel Placement", 'GIZMO')
+            if box:
+                box.label(text="Visual road wheels are Blender references; master export excludes them.")
+                box.operator("rpf.wheel_targets", icon='SPHERE')
+                box.prop(sc, "rpf_mirror_x", text="Mirror X (L/R symmetric)")
+                row = box.row(align=True)
+                row.operator("rpf.apply_wheel_targets", icon='CHECKMARK')
+                row.operator("rpf.clear_wheel_targets", text="", icon='X')
             arm = _get_armature()
             if arm:
-                box = l.box()
-                box.label(text=f"Bones ({len(arm.data.bones)}) — click to review", icon='BONE_DATA')
-                grid = box.grid_flow(columns=2, even_columns=True)
-                for b in sorted(arm.data.bones, key=lambda b: b.name):
-                    op = grid.operator("rpf.select_bone", text=b.name)
-                    op.bone = b.name
-                l.operator("rpf.pose_reset", icon='LOOP_BACK')
+                box = _draw_accordion(l, sc, "rpf_ui_rig_bone_review", f"Bones ({len(arm.data.bones)}) - click to edit", 'BONE_DATA')
+                if box:
+                    grid = box.grid_flow(columns=2, even_columns=True)
+                    for b in sorted(arm.data.bones, key=lambda b: b.name):
+                        op = grid.operator("rpf.select_bone", text=b.name)
+                        op.bone = b.name
+                    box.operator("rpf.pose_reset", icon='LOOP_BACK')
             else:
                 l.label(text="no armature yet — Build Bones", icon='INFO')
 
         elif tab == 'MEMORY':
             l.operator("rpf.add_sockets", icon='EMPTY_AXIS')
+            box = l.box()
+            box.label(text="Mirror Memory Points", icon='MOD_MIRROR')
+            row = box.row(align=True)
+            op = row.operator("rpf.mirror_memory_points", text="Mirror R -> L")
+            op.direction = 'RIGHT_TO_LEFT'
+            op.selected_only = False
+            op = row.operator("rpf.mirror_memory_points", text="Mirror L -> R")
+            op.direction = 'LEFT_TO_RIGHT'
+            op.selected_only = False
+            row = box.row(align=True)
+            op = row.operator("rpf.mirror_memory_points", text="Selected R -> L")
+            op.direction = 'RIGHT_TO_LEFT'
+            op.selected_only = True
+            op = row.operator("rpf.mirror_memory_points", text="Selected L -> R")
+            op.direction = 'LEFT_TO_RIGHT'
+            op.selected_only = True
             l.operator("rpf.scan_lights", icon='LIGHT_SPOT')
             row = l.row(align=True)
             row.prop(sc, "rpf_seat_count", text="Rear bench seats")
@@ -3972,72 +6753,166 @@ class RPF_PT_panel(bpy.types.Panel):
             box.operator("rpf.bake_lod", icon='MOD_DECIM')
 
         elif tab == 'BUILD':
-            box = l.box()
-            box.label(text="Collision Review", icon='HIDE_OFF')
-            row = box.row(align=True)
-            for mode, label in (('MODEL', "Model"), ('UCX', "UCX"),
-                                ('FIRE', "FireGeo"), ('ALL', "All")):
-                op = row.operator("rpf.collision_view", text=label)
-                op.mode = mode
-            row = box.row(align=True)
-            for axis, label in (('LEFT', "L"), ('RIGHT', "R"), ('FRONT', "F"),
-                                ('BACK', "B"), ('TOP', "Top")):
-                op = row.operator("rpf.view_axis", text=label)
-                op.axis = axis
-            box.operator("rpf.sort_collapse", icon='OUTLINER_COLLECTION')
-            onebox = l.box()
-            onebox.label(text="One-Click Physics + Tidy", icon='MODIFIER')
-            onebox.operator("rpf.build_all_physics", icon='AUTO')
-            frow = onebox.row(align=True)
-            frow.operator("rpf.fix_ucx", icon='CHECKMARK')
-            frow.operator("rpf.cleanup_colliders", text="Tidy (generated)", icon='TRASH').mode = 'GENERATED'
-            frow2 = onebox.row(align=True)
-            frow2.operator("rpf.cleanup_colliders", text="Remove invalid", icon='TRASH').mode = 'INVALID'
-            frow2.operator("rpf.cleanup_colliders", text="Remove all", icon='TRASH').mode = 'ALL'
-            cbox = l.box()
-            cbox.label(text="Collision (UCX)", icon='MESH_CUBE')
-            cbox.operator("rpf.build_colliders", icon='MESH_CUBE')
-            crow = cbox.row(align=True)
-            crow.operator("rpf.selected_parts_to_ucx", icon='MESH_ICOSPHERE')
-            crow.operator("rpf.validate_ucx", text="Validate", icon='CHECKMARK')
-            cbox.operator("rpf.convexify_selected_ucx", icon='MESH_ICOSPHERE')
-            vbox = l.box()
-            vbox.label(text="V-HACD multi-hull (collision / LOD geo)", icon='MOD_REMESH')
-            vbox.prop(sc, "rpf_vhacd_exe", text="V-HACD exe (optional)")
-            vrow = vbox.row(align=True)
-            vrow.operator("rpf.vhacd_selected", icon='MESH_ICOSPHERE')
-            vrow.operator("rpf.install_vhacd_deps", text="Install deps", icon='IMPORT')
-            gbox = l.box()
-            gbox.label(text="Geometry / Parts", icon='MESH_ICOSPHERE')
-            gbox.operator("rpf.build_firegeo", text="Build FireGeo", icon='MESH_ICOSPHERE')
-            gbox.operator("rpf.separate_wheels", icon='MESH_CIRCLE')
+            box = _draw_accordion(l, sc, "rpf_ui_build_review", "Collision Review", 'HIDE_OFF')
+            if box:
+                _draw_collision_review_controls(box, sc)
+
+            abox = _draw_accordion(l, sc, "rpf_ui_build_analysis", "Smart Part Analysis", 'VIEWZOOM')
+            if abox:
+                row = abox.row(align=True)
+                row.operator("rpf.analyze_vehicle_parts", icon='ZOOM_SELECTED')
+                op = row.operator("rpf.analyze_vehicle_parts", text="Analyze + Select", icon='RESTRICT_SELECT_OFF')
+                op.select_vehicle_groups = True
+                summary = sc.get("rpf_semantic_summary", "")
+                roles = sc.get("rpf_semantic_roles", "")
+                if summary:
+                    abox.label(text=summary[:96])
+                if roles:
+                    abox.label(text=roles[:96])
+                grid = abox.grid_flow(columns=3, even_columns=True)
+                for group in ("exterior", "cab", "rear_area", "hood", "undercarriage",
+                              "door_FL", "door_FR", "door_RL", "door_RR", "door_trunk",
+                              "glass", "lights_front", "lights_rear", "wheel_FL", "wheel_FR",
+                              "wheel_RL", "wheel_RR"):
+                    op = grid.operator("rpf.select_semantic_group", text=group)
+                    op.group = group
+
+            onebox = _draw_accordion(l, sc, "rpf_ui_build_oneclick", "One-Click Physics + Tidy", 'MODIFIER')
+            if onebox:
+                row = onebox.row(align=True)
+                row.prop(sc, "rpf_auto_analyze_collision", text="Analyze")
+                row.prop(sc, "rpf_build_use_vhacd", text="Use V-HACD/CoACD")
+                row.prop(sc, "rpf_build_do_lod", text="Bake LOD")
+                onebox.prop(sc, "rpf_build_categories", text="Groups")
+                op = onebox.operator("rpf.build_all_physics", icon='AUTO')
+                op.use_vhacd = sc.rpf_build_use_vhacd
+                op.do_lod = sc.rpf_build_do_lod
+                frow = onebox.row(align=True)
+                frow.operator("rpf.fix_ucx", icon='CHECKMARK')
+                frow.operator("rpf.cleanup_colliders", text="Tidy (generated)", icon='TRASH').mode = 'GENERATED'
+                frow2 = onebox.row(align=True)
+                frow2.operator("rpf.cleanup_colliders", text="Remove invalid", icon='TRASH').mode = 'INVALID'
+                frow2.operator("rpf.cleanup_colliders", text="Remove all", icon='TRASH').mode = 'ALL'
+
+            cbox = _draw_accordion(l, sc, "rpf_ui_build_ucx", "Collision (UCX)", 'MESH_CUBE')
+            if cbox:
+                cbox.operator("rpf.build_colliders", icon='MESH_CUBE')
+                crow = cbox.row(align=True)
+                op = crow.operator("rpf.selected_parts_to_ucx", icon='MESH_ICOSPHERE')
+                op.replace_generated = sc.rpf_ucx_replace_existing
+                crow.operator("rpf.validate_ucx", text="Validate", icon='CHECKMARK')
+                row = cbox.row(align=True)
+                op = row.operator("rpf.selected_faces_to_ucx", text="Edit Faces -> UCX", icon='FACESEL')
+                op.use_decomposition = sc.rpf_selected_faces_use_decomp
+                op.split_loose = sc.rpf_selected_faces_split_loose
+                op.replace_generated = sc.rpf_ucx_replace_existing
+                row.operator("rpf.apply_collision_materials", text="Fix Layer + Gamemats", icon='MATERIAL')
+                row = cbox.row(align=True)
+                row.prop(sc, "rpf_selected_faces_use_decomp", text="Decompose")
+                row.prop(sc, "rpf_selected_faces_split_loose", text="Split islands")
+                cbox.prop(sc, "rpf_ucx_replace_existing", text="Replace existing generated UCX")
+                cbox.operator("rpf.convexify_selected_ucx", icon='MESH_ICOSPHERE')
+
+            vbox = _draw_accordion(l, sc, "rpf_ui_build_vhacd", "V-HACD multi-hull (collision / LOD geo)", 'MOD_REMESH')
+            if vbox:
+                vbox.prop(sc, "rpf_ucx_backend", text="Backend")
+                vbox.prop(sc, "rpf_vhacd_exe", text="V-HACD exe (optional)")
+                vbox.operator("rpf.autotune_collision_settings", icon='AUTO')
+                autotune = sc.get("rpf_autotune_summary", "")
+                if autotune:
+                    vbox.label(text=autotune[:96], icon='INFO')
+                row = vbox.row(align=True)
+                row.prop(sc, "rpf_ucx_max_hulls", text="Max Hulls")
+                row.prop(sc, "rpf_ucx_max_faces", text="Face Cap")
+                row = vbox.row(align=True)
+                row.prop(sc, "rpf_ucx_decimate", text="Input Tris")
+                row.prop(sc, "rpf_ucx_concavity", text="Concavity")
+                vbox.prop(sc, "rpf_ucx_threads", text="Worker Threads")
+                adv = _draw_accordion(vbox, sc, "rpf_ui_build_vhacd_advanced", "Enfusion/VHACD controls", 'TOOL_SETTINGS')
+                if adv:
+                    row = adv.row(align=True)
+                    row.prop(sc, "rpf_vhacd_resolution", text="Voxel Res")
+                    row.prop(sc, "rpf_vhacd_volume_error", text="Vol Err")
+                    row = adv.row(align=True)
+                    row.prop(sc, "rpf_vhacd_recursion_depth", text="Depth")
+                    row.prop(sc, "rpf_vhacd_max_vertices", text="Max Verts")
+                    row = adv.row(align=True)
+                    row.prop(sc, "rpf_vhacd_shrinkwrap", text="Shrinkwrap")
+                    row.prop(sc, "rpf_vhacd_split_hulls", text="Best split")
+                    row = adv.row(align=True)
+                    row.prop(sc, "rpf_vhacd_fill_mode", text="Fill")
+                    row.prop(sc, "rpf_vhacd_min_edge_length", text="Min Edge")
+                    adv.prop(sc, "rpf_vhacd_pre_scale", text="Pre-scale")
+                vrow = vbox.row(align=True)
+                op = vrow.operator("rpf.vhacd_selected", icon='MESH_ICOSPHERE')
+                op.max_hulls = sc.rpf_ucx_max_hulls
+                op.max_faces = sc.rpf_ucx_max_faces
+                op.decimate_target = sc.rpf_ucx_decimate
+                op.threshold = sc.rpf_ucx_concavity
+                op.backend = sc.rpf_ucx_backend
+                op.thread_count = sc.rpf_ucx_threads
+                op.replace_generated = sc.rpf_ucx_replace_existing
+                vrow.operator("rpf.find_vhacd_exe", text="", icon='VIEWZOOM')
+                vrow.operator("rpf.install_vhacd_deps", text="Install deps", icon='IMPORT')
+
+            gbox = _draw_accordion(l, sc, "rpf_ui_build_geometry", "Geometry / Parts", 'MESH_ICOSPHERE')
+            if gbox:
+                gbox.operator("rpf.build_firegeo", text="Build FireGeo", icon='MESH_ICOSPHERE')
+                row = gbox.row(align=True)
+                row.prop(sc, "rpf_direct_copy_ratio", text="Copy Ratio")
+                row.prop(sc, "rpf_direct_copy_merge", text="Merge")
+                row = gbox.row(align=True)
+                op = row.operator("rpf.selected_to_direct_collision", text="Selected -> UCX Copy", icon='DUPLICATE')
+                op.mode = 'UCXVEHICLE'
+                op.decimate_ratio = sc.rpf_direct_copy_ratio
+                op.merge_selected = sc.rpf_direct_copy_merge
+                op = row.operator("rpf.selected_to_direct_collision", text="Selected -> UTM FireGeo", icon='DUPLICATE')
+                op.mode = 'FIREGEO'
+                op.decimate_ratio = sc.rpf_direct_copy_ratio
+                op.merge_selected = sc.rpf_direct_copy_merge
+                row = gbox.row(align=True)
+                op = row.operator("rpf.selected_to_direct_collision", text="Glass", icon='DUPLICATE')
+                op.mode = 'GLASSFIRE'
+                op.decimate_ratio = sc.rpf_direct_copy_ratio
+                op.merge_selected = sc.rpf_direct_copy_merge
+                op = row.operator("rpf.selected_to_direct_collision", text="UTM VehicleComplex Detail", icon='DUPLICATE')
+                op.mode = 'VEHICLECOMPLEX'
+                op.decimate_ratio = sc.rpf_direct_copy_ratio
+                op.merge_selected = sc.rpf_direct_copy_merge
+                gbox.operator("rpf.separate_wheels", icon='MESH_CIRCLE')
 
         elif tab == 'EXPORT':
-            box = l.box()
-            box.label(text="Collision Review", icon='HIDE_OFF')
-            row = box.row(align=True)
-            for mode, label in (('MODEL', "Model"), ('UCX', "UCX"),
-                                ('FIRE', "FireGeo"), ('ALL', "All")):
-                op = row.operator("rpf.collision_view", text=label)
-                op.mode = mode
-            box.operator("rpf.sort_collapse", icon='OUTLINER_COLLECTION')
-            box = l.box()
-            box.label(text="Export Target", icon='FILE_FOLDER')
-            box.prop(sc, "rpf_asset_name", text="Asset")
-            box.prop(sc, "rpf_export_root", text="Directory")
-            box = l.box()
-            box.label(text="Master FBX Includes", icon='CHECKMARK')
-            box.prop(sc, "rpf_export_render", text="Render exterior / interior / doors")
-            box.prop(sc, "rpf_export_armature", text="Armature")
-            box.prop(sc, "rpf_export_memory", text="Memory points / sockets")
-            box.prop(sc, "rpf_export_vehicle_collision", text="Vehicle collision (UCL / UCX)")
-            box.prop(sc, "rpf_export_firegeo", text="FireGeo / component hit zones")
-            box.prop(sc, "rpf_export_glass_firegeo", text="Armored glass FireGeo (UTM_Glass)")
-            box.prop(sc, "rpf_export_visual_glass", text="Visual glass in master (bulletproof)")
-            box = l.box()
-            box.label(text="Separate Slot Exports", icon='OUTLINER_COLLECTION')
-            box.prop(sc, "rpf_export_wheel_slot", text="Wheel FBX (optional)")
-            box.prop(sc, "rpf_export_dst_glass", text="DST glass FBXs")
+            box = _draw_accordion(l, sc, "rpf_ui_export_review", "Collision Review", 'HIDE_OFF')
+            if box:
+                _draw_collision_review_controls(box, sc)
+
+            box = _draw_accordion(l, sc, "rpf_ui_export_target", "Export Target", 'FILE_FOLDER')
+            if box:
+                box.prop(sc, "rpf_asset_name", text="Asset")
+                box.prop(sc, "rpf_export_root", text="Directory")
+                box.prop(sc, "rpf_open_web_after_export", text="Open web helper after export")
+                box.operator("rpf.open_build_import_web_tool", icon='URL')
+
+            box = _draw_accordion(l, sc, "rpf_ui_export_master", "Master FBX Includes", 'CHECKMARK')
+            if box:
+                box.prop(sc, "rpf_export_render", text="Render exterior / interior / doors")
+                box.prop(sc, "rpf_export_armature", text="Armature")
+                box.prop(sc, "rpf_export_memory", text="Memory points / sockets")
+                box.prop(sc, "rpf_auto_skin_before_export", text="Auto repair rigid part bindings")
+                box.operator("rpf.skin_parts", text="Skin All Parts Now", icon='MOD_VERTEX_WEIGHT')
+                box.prop(sc, "rpf_export_vehicle_collision", text="Vehicle collision (UCL / UCX)")
+                box.prop(sc, "rpf_export_firegeo", text="FireGeo / component hit zones")
+                box.prop(sc, "rpf_export_glass_firegeo", text="Armored glass FireGeo (UTM_Glass)")
+                box.prop(sc, "rpf_export_visual_glass", text="Visual glass in master (bulletproof)")
+
+            box = _draw_accordion(l, sc, "rpf_ui_export_slots", "Separate Slot Exports", 'OUTLINER_COLLECTION')
+            if box:
+                box.prop(sc, "rpf_export_wheel_slot", text="Wheel FBX (optional)")
+                if sc.rpf_export_wheel_slot:
+                    box.prop(sc, "rpf_export_wheel_slot_mode", text="Wheel mode")
+                box.prop(sc, "rpf_export_dst_glass", text="DST glass FBXs")
+                box.prop(sc, "rpf_export_light_slots", text="Light cover FBXs")
+                box.operator("rpf.export_selected_fbx", text="Export Selected FBX", icon='EXPORT')
             l.operator("rpf.export_enfusion", icon='EXPORT')
             l.operator("rpf.export_em_lamps", icon='LIGHT_SUN')
 
@@ -4051,8 +6926,13 @@ class RPF_PT_panel(bpy.types.Panel):
 
 CLASSES = (RPF_OT_discover, RPF_OT_build_colliders, RPF_OT_build_firegeo,
            RPF_OT_selected_parts_to_ucx, RPF_OT_validate_ucx,
+           RPF_OT_selected_faces_to_ucx, RPF_OT_apply_collision_materials,
+           RPF_OT_autotune_collision_settings,
            RPF_OT_convexify_selected_ucx,
+           RPF_OT_analyze_vehicle_parts, RPF_OT_select_semantic_group,
+           RPF_OT_selected_to_direct_collision,
            RPF_OT_separate_wheels, RPF_OT_vhacd_selected, RPF_OT_install_vhacd_deps,
+           RPF_OT_find_vhacd_exe,
            RPF_OT_cleanup_colliders, RPF_OT_fix_ucx, RPF_OT_build_all_physics,
            RPF_OT_collision_view, RPF_OT_view_axis, RPF_OT_sort_collapse,
            RPF_OT_auto_setup, RPF_OT_organize, RPF_OT_quick_select, RPF_OT_review,
@@ -4060,11 +6940,18 @@ CLASSES = (RPF_OT_discover, RPF_OT_build_colliders, RPF_OT_build_firegeo,
            RPF_OT_send_interior, RPF_OT_add_selected, RPF_OT_move_selected,
            RPF_OT_snap_back, RPF_OT_check_transforms, RPF_OT_apply_textures,
            RPF_OT_finalize, RPF_OT_explode_part, RPF_OT_rejoin_parts,
-           RPF_OT_extract_selection, RPF_OT_export_enfusion, RPF_OT_export_em_lamps,
-           RPF_OT_build_rig, RPF_OT_skin_parts, RPF_OT_select_bone, RPF_OT_pose_reset,
+           RPF_OT_extract_selection, RPF_OT_export_enfusion, RPF_OT_open_build_import_web_tool,
+           RPF_OT_export_selected_fbx, RPF_OT_export_em_lamps,
+           RPF_OT_build_rig, RPF_OT_mirror_door_bones,
+           RPF_OT_assign_rig_role, RPF_OT_rename_to_rig_role,
+           RPF_OT_create_missing_rig_bone, RPF_OT_bind_selected_to_rig_bone,
+           RPF_OT_bind_edit_selection_to_rig_bone, RPF_OT_mirror_selected_rig_bone,
+           RPF_OT_validate_rig_assignments,
+           RPF_OT_skin_parts, RPF_OT_select_bone, RPF_OT_pose_reset,
            RPF_OT_recenter, RPF_OT_wheel_targets, RPF_OT_apply_wheel_targets,
            RPF_OT_clear_wheel_targets,
-           RPF_OT_add_sockets, RPF_OT_add_socket_cursor, RPF_OT_add_bench_seats, RPF_OT_select_socket,
+           RPF_OT_add_sockets, RPF_OT_mirror_memory_points,
+           RPF_OT_add_socket_cursor, RPF_OT_add_bench_seats, RPF_OT_select_socket,
            RPF_OT_scan_lights,
            RPF_OT_bake_lod,
            RPF_PT_panel)
@@ -4093,18 +6980,78 @@ def register():
                ('LOD', "LOD", "Decimate to an adjustable tri budget"),
                ('BUILD', "Build", "One-click physics: collision, FireGeo, LOD, V-HACD, tidy/fix"),
                ('EXPORT', "Exp", "Enfusion FBX exports")])
+    for prop_name, label in (
+        ("rpf_ui_build_review", "Build collision review"),
+        ("rpf_ui_build_analysis", "Build smart part analysis"),
+        ("rpf_ui_build_oneclick", "Build one-click physics"),
+        ("rpf_ui_build_ucx", "Build UCX collision"),
+        ("rpf_ui_build_vhacd", "Build V-HACD controls"),
+        ("rpf_ui_build_vhacd_advanced", "Build advanced V-HACD controls"),
+        ("rpf_ui_build_geometry", "Build geometry parts"),
+        ("rpf_ui_export_review", "Export collision review"),
+        ("rpf_ui_export_target", "Export target"),
+        ("rpf_ui_export_master", "Export master FBX includes"),
+        ("rpf_ui_export_slots", "Export slot FBXs"),
+        ("rpf_ui_rig_assignment", "Rig assignment"),
+        ("rpf_ui_rig_door_repair", "Rig door repair"),
+        ("rpf_ui_rig_wheel_placement", "Rig wheel placement"),
+        ("rpf_ui_rig_bone_review", "Rig bone review"),
+    ):
+        setattr(
+            bpy.types.Scene,
+            prop_name,
+            bpy.props.BoolProperty(name=label, default=True),
+        )
+    bpy.types.Scene.rpf_rig_role = bpy.props.EnumProperty(
+        name="Rig role",
+        default='STEERING',
+        items=[
+            ('STEERING', "Steering Wheel", "Bind to v_steering_wheel"),
+            ('WHEEL', "Wheel", "Road wheel slot reference mesh"),
+            ('ROTATOR', "Rotator", "Steering rotator mesh/bone"),
+            ('SUSPENSION', "Suspension", "Suspension/strut mesh/bone"),
+            ('DOOR', "Door", "Door or trunk movable mesh"),
+            ('BODY', "Body", "Rigid body mesh bound to v_body"),
+            ('INTERIOR', "Interior", "Interior mesh bound to v_body"),
+            ('LIGHT', "Light", "Light or lens mesh bound to v_body"),
+            ('GLASS', "Glass", "Glass render mesh bound to v_body or door if assigned"),
+            ('HANDBRAKE', "Handbrake", "Bind to v_handbrake"),
+            ('PEDAL_BRAKE', "Brake Pedal", "Bind to v_pedal_brake"),
+            ('PEDAL_THROTTLE', "Throttle Pedal", "Bind to v_pedal_throttle"),
+            ('CUSTOM', "Custom Bone", "Use the custom bone field directly"),
+        ])
+    bpy.types.Scene.rpf_rig_slot = bpy.props.EnumProperty(
+        name="Rig slot",
+        default='FL',
+        items=[
+            ('FL', "FL/L01", "Front left / l01"),
+            ('FR', "FR/R01", "Front right / r01"),
+            ('RL', "RL/L02", "Rear left / l02"),
+            ('RR', "RR/R02", "Rear right / r02"),
+            ('TRUNK', "Trunk", "Trunk/tailgate slot"),
+        ])
+    bpy.types.Scene.rpf_rig_custom_bone = bpy.props.StringProperty(
+        name="Target bone",
+        default="v_steering_wheel",
+        description="Explicit target bone for manual assignment, custom roles, and mirror/review operations")
     bpy.types.Scene.rpf_asset_name = bpy.props.StringProperty(
         name="Asset", default=ASSET_NAME,
         description="Asset/file base name used by the exporters")
     bpy.types.Scene.rpf_export_root = bpy.props.StringProperty(
         name="Export Root", default=EXPORT_ROOT, subtype='DIR_PATH',
         description="Addon asset folder the FBX set is written into")
+    bpy.types.Scene.rpf_open_web_after_export = bpy.props.BoolProperty(
+        name="Open web helper after export", default=True,
+        description="After FBX export, open the local browser helper prefilled with this vehicle's export settings")
     bpy.types.Scene.rpf_export_render = bpy.props.BoolProperty(
         name="Render meshes", default=True)
     bpy.types.Scene.rpf_export_armature = bpy.props.BoolProperty(
         name="Armature", default=True)
     bpy.types.Scene.rpf_export_memory = bpy.props.BoolProperty(
         name="Memory points", default=True)
+    bpy.types.Scene.rpf_auto_skin_before_export = bpy.props.BoolProperty(
+        name="Auto repair rigid part bindings", default=True,
+        description="Before export, run Skin All Parts automatically if doors, wheels, brakes, steering, or pedals lost rigid armature binding")
     bpy.types.Scene.rpf_export_vehicle_collision = bpy.props.BoolProperty(
         name="Vehicle collision", default=True)
     bpy.types.Scene.rpf_export_firegeo = bpy.props.BoolProperty(
@@ -4117,13 +7064,109 @@ def register():
     bpy.types.Scene.rpf_export_wheel_slot = bpy.props.BoolProperty(
         name="Wheel slot FBX", default=False,
         description="Export a separate visual wheel FBX; sockets and wheel colliders remain in the master")
+    bpy.types.Scene.rpf_export_wheel_slot_mode = bpy.props.EnumProperty(
+        name="Wheel slot mode",
+        default='FRONT_REAR',
+        items=[
+            ('SINGLE', "Single", "Export one wheel slot FBX from the first available wheel"),
+            ('FRONT_REAR', "Front + Rear", "Export separate front and rear wheel slot FBXs; useful for rear dually wheels"),
+            ('ALL', "All four", "Export FL/FR/RL/RR wheel slot FBXs"),
+            ('SELECTED', "Selected Alt", "Export selected wheel meshes together as an alternate wheel slot FBX"),
+        ],
+        description="Wheel slot export variant for vehicles with different front/rear/alternate wheel geometry")
     bpy.types.Scene.rpf_export_dst_glass = bpy.props.BoolProperty(
         name="DST glass FBXs", default=True,
         description="Export separate destructible glass slot FBXs; visual glass stays out of the master")
+    bpy.types.Scene.rpf_export_light_slots = bpy.props.BoolProperty(
+        name="Light cover FBXs", default=False,
+        description="Export lights_front and lights_rear as separate slot FBXs")
     bpy.types.Scene.rpf_vhacd_exe = bpy.props.StringProperty(
         name="V-HACD exe", default="", subtype='FILE_PATH',
         description="Optional path to an external V-HACD executable (TestVHACD v4). "
                     "Used only when the CoACD python module is not installed")
+    bpy.types.Scene.rpf_ucx_backend = bpy.props.EnumProperty(
+        name="UCX backend",
+        default='AUTO',
+        items=[('AUTO', "Auto", "CoACD, vhacdx, external V-HACD, then capped convex fallback"),
+               ('COACD', "CoACD", "Use Blender Python CoACD only"),
+               ('VHACDX', "VHACD Python", "Use Enfusion Tools-style vhacdx Python backend only"),
+               ('EXE', "External", "Use external V-HACD executable only"),
+               ('FALLBACK', "Fallback", "Skip decomposition and use capped convex fallback")])
+    bpy.types.Scene.rpf_ucx_max_hulls = bpy.props.IntProperty(
+        name="Max UCX hulls", default=24, min=1, max=96,
+        description="Maximum convex hulls generated per grouped vehicle part")
+    bpy.types.Scene.rpf_ucx_max_faces = bpy.props.IntProperty(
+        name="UCX face cap", default=200, min=12, max=200,
+        description="Maximum faces per generated UCX hull")
+    bpy.types.Scene.rpf_ucx_decimate = bpy.props.IntProperty(
+        name="Input triangle target", default=6000, min=0, max=100000,
+        description="Reduce input mesh to roughly this many triangles before decomposition; 0 uses full resolution")
+    bpy.types.Scene.rpf_ucx_concavity = bpy.props.FloatProperty(
+        name="CoACD concavity", default=0.035, min=0.005, max=1.0, precision=3,
+        description="Lower values create more hulls and follow curves/hard edges more closely")
+    bpy.types.Scene.rpf_ucx_threads = bpy.props.IntProperty(
+        name="UCX worker threads", default=1, min=1, max=8,
+        description="Parallel decomposition jobs for multiple selected meshes. Blender object creation stays single-threaded")
+    bpy.types.Scene.rpf_ucx_replace_existing = bpy.props.BoolProperty(
+        name="Replace existing generated UCX",
+        default=False,
+        description="When enabled, selected UCX/V-HACD builds remove prior generated hulls first. Leave off to build panel-by-panel")
+    bpy.types.Scene.rpf_selected_faces_use_decomp = bpy.props.BoolProperty(
+        name="Decompose selected faces", default=True,
+        description="Use the selected VHACD/CoACD backend for Edit Faces -> UCX instead of a single convex hull")
+    bpy.types.Scene.rpf_selected_faces_split_loose = bpy.props.BoolProperty(
+        name="Split selected face islands", default=True,
+        description="Build each disconnected selected face island separately so hulls follow hard body breaks")
+    bpy.types.Scene.rpf_vhacd_resolution = bpy.props.IntProperty(
+        name="Voxel resolution", default=100000, min=1000, max=10000000,
+        description="VHACD voxel resolution; higher follows curved panels more closely and takes longer")
+    bpy.types.Scene.rpf_vhacd_volume_error = bpy.props.FloatProperty(
+        name="Volume error percent", default=1.0, min=0.001, max=10.0, precision=3,
+        description="VHACD allowed volume error percentage; lower is tighter and slower")
+    bpy.types.Scene.rpf_vhacd_recursion_depth = bpy.props.IntProperty(
+        name="Recursion depth", default=10, min=1, max=32,
+        description="VHACD recursive split depth")
+    bpy.types.Scene.rpf_vhacd_shrinkwrap = bpy.props.BoolProperty(
+        name="Shrinkwrap", default=True,
+        description="Shrink VHACD hulls back toward the source surface")
+    bpy.types.Scene.rpf_vhacd_fill_mode = bpy.props.EnumProperty(
+        name="Fill mode",
+        default='flood',
+        items=[('flood', "Flood", "Flood-fill interior voxels"),
+               ('surface', "Surface", "Surface fill"),
+               ('raycast', "Raycast", "Raycast fill")],
+        description="VHACD interior fill mode")
+    bpy.types.Scene.rpf_vhacd_max_vertices = bpy.props.IntProperty(
+        name="Max hull vertices", default=64, min=9, max=256,
+        description="Maximum vertices per VHACD output hull before our final face cap")
+    bpy.types.Scene.rpf_vhacd_min_edge_length = bpy.props.IntProperty(
+        name="Min voxel edge", default=2, min=1, max=32,
+        description="Smallest voxel edge length allowed before recursion stops")
+    bpy.types.Scene.rpf_vhacd_split_hulls = bpy.props.BoolProperty(
+        name="Best split plane", default=False,
+        description="Ask VHACD to search for a better split plane instead of midpoint splits")
+    bpy.types.Scene.rpf_vhacd_pre_scale = bpy.props.FloatProperty(
+        name="Pre-scale", default=1.0, min=0.001, max=1.0, precision=3,
+        description="Temporarily shrink source verts before VHACD; useful for reducing outward air gaps")
+    bpy.types.Scene.rpf_build_use_vhacd = bpy.props.BoolProperty(
+        name="Use V-HACD/CoACD in 1-click", default=False,
+        description="When disabled, 1-click uses the quick perceptive UCX builder instead of decomposition")
+    bpy.types.Scene.rpf_build_do_lod = bpy.props.BoolProperty(
+        name="Bake LOD in 1-click", default=False,
+        description="Keep off while iterating collision; bake LOD only after collision review")
+    bpy.types.Scene.rpf_auto_analyze_collision = bpy.props.BoolProperty(
+        name="Analyze before collision", default=True,
+        description="Run semantic vehicle analysis before one-click collision so grouped UCX follows exterior, cab, rear area and door boundaries")
+    bpy.types.Scene.rpf_build_categories = bpy.props.StringProperty(
+        name="Grouped collision categories",
+        default="exterior,cab,rear_area,hood,undercarriage,door_FL,door_FR,door_RL,door_RR,door_trunk",
+        description="Comma-separated part/category names decomposed by 1-click V-HACD/CoACD")
+    bpy.types.Scene.rpf_direct_copy_ratio = bpy.props.FloatProperty(
+        name="Direct copy ratio", default=1.0, min=0.01, max=1.0, precision=3,
+        description="Decimation ratio for selected render meshes copied directly to FireGeo/detail collision")
+    bpy.types.Scene.rpf_direct_copy_merge = bpy.props.BoolProperty(
+        name="Merge direct copies", default=False,
+        description="Join selected direct collision copies into a single collider object")
     bpy.types.Scene.rpf_wheelbase = bpy.props.FloatProperty(
         name="Wheelbase", default=TARGET_WHEELBASE, min=1.0, max=6.0, precision=3,
         description="Real-world wheelbase (m) the model is rescaled to in Auto-Setup")

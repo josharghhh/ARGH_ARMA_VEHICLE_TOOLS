@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0
+
+- Copy-decimate tool ("Selected -> Direct Collision Copy") now builds VALID convex UCX vehicle colliders: the UCX Vehicle target produces guaranteed-convex, face-capped (<=200), outlier-rejected hulls per selected part (or one merged hull with Merge Selected), instead of a non-convex raw copy. So you can copy interior/exterior/any selection straight into working UCX colliders. FireGeo/GlassFire/VehicleComplex targets keep the exact-shape copy as before.
+
+## 0.12.2
+
+- Fixed web tool dead on Blender: rvc_core/paths.py had a backslash inside an f-string expression (legal on Python 3.12+ but a SyntaxError on Blender 4.5's Python 3.11), which broke rvc_core import and the whole build/import web tool. Rebuilt with plain concatenation.
+- Fixed the rpf web-helper absolute-import fallback to use this module's real package name (under Blender 4.5 it's bl_ext.<repo>.reforger_vehicle_checker, not a bare reforger_vehicle_checker).
+
+## 0.12.1
+
+- Separate Wheels now handles wheels that are baked into the body mesh: when no wheel-named meshes exist, it extracts wheels by proximity to the v_wheel_* bones (island-based, so the body shell is never grabbed) into wheel_FL/FR/RL/RR. Validated on the coupe (4485 body verts kept, ~2000 verts per wheel).
+- Collision Review now uses a single Enfusion-style layer color palette, highlights the active review mode button, and wraps the growing Build/Export controls in collapsible accordion sections.
+- Geometry / Parts now has direct copy buttons for `Selected -> UCX Copy` and explicit `Selected -> UTM FireGeo`, including Edit Mode selected-face support.
+- Export now auto-repairs rigid part bindings with the same Skin All Parts pass when doors/wheels lose Armature modifiers or vertex groups, and the post-export Build / Import web helper is back in the Part Fixer export flow with vehicle settings prefilled.
+
+## 0.12.0
+
+- Rebuilt the build/import web tool on the Python standard library (http.server) — no FastAPI/uvicorn, zero external dependencies. The "Open Build / Import Web Tool" button now runs it IN-PROCESS inside Blender (background thread, uses Blender's own Python) and surfaces errors, instead of silently failing on a missing system-Python dependency. Endpoints verified: /, /api/status, /static/*, /api/generate (.et + import sources), /api/check.
+
 ## 0.11.0
 
 - One-click collision is now GROUPED by category: it merges each part (body `exterior`, and each door) into one mass and decomposes THAT, instead of building a hull per tiny sub-material object. Result: far fewer, cleaner collision hulls (a body shell set + one set per door) that are much easier to read and bake. Glass/lights/wheels are excluded from the grouped collision.

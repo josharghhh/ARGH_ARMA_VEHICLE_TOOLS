@@ -8,7 +8,7 @@ rig preparation, export blocking, and the localhost setup wizard.
 bl_info = {
     "name": "Reforger Vehicle Checker",
     "author": "ARGH Vehicle Tools contributors",
-    "version": (0, 11, 0),
+    "version": (0, 13, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > RVC",
     "description": "Prepare, validate, repair, and export Enfusion vehicles",
@@ -400,13 +400,22 @@ class RVC_OT_generate_glass_colliders(bpy.types.Operator):
 
 class RVC_OT_open_setup_wizard(bpy.types.Operator):
     bl_idname = "rvc.open_setup_wizard"
-    bl_label = "Open Setup Wizard"
+    bl_label = "Open Build / Import Web Tool"
+    bl_description = ("Start the local vehicle build/import web tool inside Blender "
+                      "(stdlib http.server, no extra Python packages) and open it in your browser")
 
     def execute(self, context):
-        root = Path(__file__).resolve().parent
-        launcher = ["py", "-3", "-m", "rvc_web.app"] if os.name == "nt" else [sys.executable, "-m", "rvc_web.app"]
-        subprocess.Popen(launcher, cwd=root)
-        self.report({"INFO"}, "Setup wizard opening at http://127.0.0.1:8765")
+        try:
+            from .rvc_web import app as web_app
+        except Exception as exc:
+            self.report({"ERROR"}, f"web tool import failed: {exc}")
+            return {"CANCELLED"}
+        try:
+            web_app.serve_in_thread(open_browser=True)
+        except Exception as exc:
+            self.report({"ERROR"}, f"web tool failed to start: {exc}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Build/Import web tool at http://127.0.0.1:{web_app.PORT}")
         return {"FINISHED"}
 
 

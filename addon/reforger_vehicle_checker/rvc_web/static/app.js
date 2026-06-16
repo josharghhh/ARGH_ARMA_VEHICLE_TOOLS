@@ -1,5 +1,6 @@
 const ids = ["addon_root","asset_name","output_directory","source_blend","imported_xob_resource","external_wheel_prefab","template","legacy_alias"];
 const report = document.querySelector("#report");
+const params = new URLSearchParams(window.location.search);
 function num(id, def) {
   const el = document.querySelector("#"+id);
   const v = el ? parseFloat(el.value) : NaN;
@@ -8,6 +9,13 @@ function num(id, def) {
 function chk(id, def) {
   const el = document.querySelector("#"+id);
   return el ? el.checked : def;
+}
+function applyParams() {
+  for (const id of [...ids, "wheelbase", "wheel_radius", "track", "body_height", "mass"]) {
+    const value = params.get(id);
+    const el = document.querySelector("#"+id);
+    if (value !== null && el) el.value = value;
+  }
 }
 function payload() {
   const p = Object.fromEntries(ids.map(id => [id, document.querySelector("#"+id).value]));
@@ -36,5 +44,7 @@ document.querySelector("#check").onclick = () => call("/api/check");
 document.querySelector("#generate").onclick = () => call("/api/generate");
 fetch("/api/status").then(r=>r.json()).then(s=>{
   document.querySelector("#status").textContent = `Blender MCP ${s.blender_mcp ? "connected" : "offline"} | local-only`;
-  document.querySelector("#addon_root").value = s.addons_root;
+  if (!params.has("addon_root")) document.querySelector("#addon_root").value = s.addons_root;
+  applyParams();
 });
+applyParams();

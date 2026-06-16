@@ -12,5 +12,8 @@ def local_path(value: str | Path) -> Path:
         return Path("/mnt") / drive.group(1).lower() / drive.group(2).replace("\\", "/")
     mount = re.match(r"^/mnt/([A-Za-z])/(.*)$", text)
     if os.name == "nt" and mount:
-        return Path(f"{mount.group(1).upper()}:\\{mount.group(2).replace('/', '\\')}")
+        # NOTE: no backslash inside an f-string expression — illegal on Python <3.12
+        # (Blender 4.5 ships 3.11). Build the Windows path with plain concatenation.
+        tail = mount.group(2).replace("/", "\\")
+        return Path(mount.group(1).upper() + ":\\" + tail)
     return Path(text)

@@ -24,6 +24,8 @@ SAMPLE_REAR_WHEEL = "{4D8B26DF30A4E4D7}"
 SAMPLE_SLOT_COMPONENT = "{55BCE45E438E4CFF}"
 SAMPLE_ANIMATION_COMPONENT = "{50B803EAA459B0AF}"
 SAMPLE_PLAYER_INJECTION = "{50B803EA8AD25BC8}"
+SAMPLE_GLASS_MESH_COMPONENT = "{54ACA4E7F43678F8}"
+SAMPLE_LIGHT_MESH_COMPONENT = "{54DEF48745980A1F}"
 PREFAB_OUTPUT_DIR = "Prefabs/Vehicles/Wheeled/RVC_VEHICLES"
 
 
@@ -65,6 +67,11 @@ def _registered_resource(project: VehicleProject, relative: str) -> str:
     return f"{{WORKBENCH_GUID_REQUIRED}}{relative}"
 
 
+def _registered_or_path(project: VehicleProject, relative: str) -> str:
+    resource = _registered_resource(project, relative)
+    return relative if resource.startswith("{WORKBENCH_GUID_REQUIRED}") else resource
+
+
 def _workspace_resource(project: VehicleProject, suffix: str) -> str:
     resource_dir = _resource_directory(project)
     folder_stem = local_path(project.output_directory).name
@@ -75,6 +82,11 @@ def _workspace_resource(project: VehicleProject, suffix: str) -> str:
         if not resource.startswith("{WORKBENCH_GUID_REQUIRED}"):
             return resource
     return _registered_resource(project, f"{resource_dir}/workspaces/{name}_{suffix}")
+
+
+def _workspace_or_sample(project: VehicleProject, suffix: str, sample: str) -> str:
+    resource = _workspace_resource(project, suffix)
+    return sample if resource.startswith("{WORKBENCH_GUID_REQUIRED}") else resource
 
 
 def _resource_or_placeholder(project: VehicleProject) -> str:
@@ -138,6 +150,7 @@ def _base_prefab(project: VehicleProject) -> str:
     com_y = max(radius + 0.35, min(m.get("body_height", 1.8) * 0.42, 1.1))
     wheel = project.external_wheel_prefab
     anim_instance = _workspace_resource(project, "Vehicle.asi")
+    anim_graph = _workspace_or_sample(project, "Vehicle.agr", SAMPLE_GRAPH)
 
     components: list[str] = []
     # MeshObject: override only with a real xob. With no registered xob we omit the
@@ -194,7 +207,7 @@ def _base_prefab(project: VehicleProject) -> str:
         injection = f"\n{injection}" if injection else ""
         components.append(
             f'  VehicleAnimationComponent "{SAMPLE_ANIMATION_COMPONENT}" {{\n'
-            f'   AnimGraph "{SAMPLE_GRAPH}"\n'
+            f'   AnimGraph "{anim_graph}"\n'
             f'   AnimInstance "{anim_instance}"\n'
             f'   StartNode "VehicleMasterControl"{injection}\n'
             f'  }}'
@@ -300,8 +313,9 @@ def _player_injection(project: VehicleProject) -> str:
 def _asi(project: VehicleProject, name: str, resource_dir: str) -> str:
     steering = _registered_resource(project, f"{resource_dir}/Anims/Steering_{name}.anm")
     throttle = _registered_resource(project, f"{resource_dir}/Anims/Throttle_{name}.anm")
+    template = _workspace_or_sample(project, "Vehicle.ast", SAMPLE_AST)
     return f'''AnimSetInstanceSource {{
- Template "{SAMPLE_AST}"
+ Template "{template}"
  Lines {{
   AnimSetInstanceSource_Line "VehicleActions.Veh/Play.SteeringExtreme" {{
    Resource "{steering}"
@@ -316,23 +330,64 @@ def _asi(project: VehicleProject, name: str, resource_dir: str) -> str:
 }}'''
 
 
-def _glass_prefab(name: str, tag: str, resource_dir: str) -> str:
+def _sample_workspace_candidates(project: VehicleProject) -> list[Path]:
+    explicit = local_path(project.template_sources.get("animation", ""))
+    candidates = [explicit] if str(explicit) not in ("", ".") else []
+    addon = local_path(project.addon_root)
+    candidates.extend([
+        addon.parent / "SampleMod_NewCar" / "Assets" / "Vehicles" / "Wheeled" / "SampleCar_01" / "workspaces",
+        Path.home() / "Documents" / "My Games" / "ArmaReforgerWorkbench" / "addons"
+        / "SampleMod_NewCar" / "Assets" / "Vehicles" / "Wheeled" / "SampleCar_01" / "workspaces",
+    ])
+    found = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def _workspace_target_name(source: Path, asset_name: str) -> str:
+    suffix = source.suffix.lower()
+    if suffix in {".aw", ".agr", ".ast"}:
+        return f"{asset_name}_Vehicle{suffix}"
+    if suffix == ".asi":
+        stem = source.stem.lower()
+        lane = "Player" if "player" in stem else "Vehicle"
+        return f"{asset_name}_{lane}.asi"
+    stem = source.stem.replace("SampleCar_01", asset_name).replace("SampleCar", asset_name)
+    stem = stem.replace("Explorer", asset_name).replace("ExploreCruiser", asset_name)
+    return f"{stem}{source.suffix}"
+
+
+def _clone_workspace_text(text: str, asset_name: str, resource_dir: str) -> str:
+    text = text.replace("Assets/Vehicles/Wheeled/SampleCar_01", resource_dir)
+    text = text.replace("SampleCar_01", asset_name)
+    text = text.replace("SampleCar", asset_name)
+    text = text.replace("Assets/Vehicles/Wheeled/ExploreCruiser", resource_dir)
+    text = text.replace("ExploreCruiser", asset_name).replace("Explorer", asset_name)
+    text = text.replace("steeringwheel_explorer", f"Steering_{asset_name}")
+    return text
+
+
+def _glass_prefab(project: VehicleProject, name: str, tag: str, resource_dir: str) -> str:
+    xob = _registered_or_path(project, f"{resource_dir}/Dst/{name}_Glass_{tag}.xob")
     return f'''GenericEntity : "{{474FBF7F46802ACD}}Prefabs/Vehicles/Wheeled/SampleCar_01/Dst/SampleCar_01_glass_base.et" {{
  ID "RVC_{name}_GLASS_{tag}"
  components {{
-  MeshObject "RVC_MESH" {{
-   Object "{{WORKBENCH_GUID_REQUIRED}}{resource_dir}/Dst/{name}_Glass_{tag}.xob"
+  MeshObject "{SAMPLE_GLASS_MESH_COMPONENT}" {{
+   Object "{xob}"
   }}
  }}
 }}'''
 
 
-def _light_prefab(name: str, kind: str, side: str, resource_dir: str) -> str:
+def _light_prefab(project: VehicleProject, name: str, kind: str, side: str, resource_dir: str) -> str:
+    xob = _registered_or_path(project, f"{resource_dir}/Lights/{name}_{kind}_{side}.xob")
     return f'''GameEntity : "{{A50B7F75B249F351}}Prefabs/Vehicles/Core/Lights/VehicleEmissiveSurface_Base.et" {{
  ID "RVC_{name}_{kind}_{side}"
  components {{
-  MeshObject "RVC_MESH" {{
-   Object "{{WORKBENCH_GUID_REQUIRED}}{resource_dir}/Lights/{name}_{kind}_{side}.xob"
+  MeshObject "{SAMPLE_LIGHT_MESH_COMPONENT}" {{
+   Object "{xob}"
   }}
  }}
 }}'''
@@ -364,31 +419,35 @@ def generate_vehicle_sources(project: VehicleProject) -> dict[str, object]:
         _write(output / "export_profiles" / f"{name}.apr", _apr(name)),
     ]
     if project.features.get("glass", True):
-        for tag in ("F", "FL", "FR", "R", "RL", "RR"):
-            written.append(_write(prefab_root / "Dst" / f"{name}_glass_{tag}.et", _glass_prefab(name, tag, resource_dir)))
+        for tag in ("F", "FL", "FR", "R", "RL", "RR", "Light_FL", "Light_FR", "Light_RL", "Light_RR"):
+            written.append(_write(prefab_root / "Dst" / f"{name}_glass_{tag}.et", _glass_prefab(project, name, tag, resource_dir)))
     if project.features.get("lights", True):
         for kind in ("Headlight", "Brakelight"):
             for side in ("L", "R"):
-                written.append(_write(prefab_root / "Lights" / f"{name}_{kind}_{side}.et", _light_prefab(name, kind, side, resource_dir)))
+                written.append(_write(prefab_root / "Lights" / f"{name}_{kind}_{side}.et", _light_prefab(project, name, kind, side, resource_dir)))
         written.append(_write(output / "Lights" / "Data" / "headlight_glass.emat", _glass_emat(name, "0.95 0.95 1 1", resource_dir)))
         written.append(_write(output / "Lights" / "Data" / "brakelight_glass.emat", _glass_emat(name, "1 0.03 0.03 1", resource_dir)))
-    animation_template = local_path(project.template_sources.get("animation", ""))
-    if animation_template.is_dir():
+    for animation_template in _sample_workspace_candidates(project):
         for source in animation_template.glob("*"):
-            if source.suffix.lower() in {".aw", ".agr", ".agf", ".ast", ".asi"}:
-                text = source.read_text(encoding="utf-8", errors="ignore")
-                text = re.sub(
-                    r"\{[0-9A-Fa-f]{16}\}(?=Assets/Vehicles/Wheeled/ExploreCruiser)",
-                    "{WORKBENCH_GUID_REQUIRED}",
-                    text,
-                )
-                text = text.replace("ExploreCruiser", name).replace("Explorer", name)
-                text = text.replace("steeringwheel_explorer", f"Steering_{name}")
-                text = text.replace(
-                    f"{{WORKBENCH_GUID_REQUIRED}}Assets/Vehicles/Wheeled/{name}/{name}.xob",
-                    _resource_or_placeholder(project),
-                )
-                written.append(_write(output / "workspaces" / source.name.replace("Explorer", name), text))
+            if source.suffix.lower() not in {".aw", ".agr", ".agf", ".ast", ".asi"}:
+                continue
+            target_name = _workspace_target_name(source, name)
+            # Keep our generated Vehicle.asi because it maps the steering/throttle
+            # TXA resources for this vehicle. Clone graph/template/workspace files
+            # around it instead of reusing a stock ASI that points at SampleCar ANMs.
+            if target_name == f"{name}_Vehicle.asi":
+                continue
+            text = _clone_workspace_text(
+                source.read_text(encoding="utf-8", errors="ignore"),
+                name,
+                resource_dir,
+            )
+            text = text.replace(
+                f"{{WORKBENCH_GUID_REQUIRED}}{resource_dir}/{name}.xob",
+                _resource_or_placeholder(project),
+            )
+            written.append(_write(output / "workspaces" / target_name, text, backup=True))
+        break
     if project.legacy_alias:
         alias = prefab_root / project.legacy_alias
         if alias.exists() and alias.with_suffix(alias.suffix + ".meta").exists():

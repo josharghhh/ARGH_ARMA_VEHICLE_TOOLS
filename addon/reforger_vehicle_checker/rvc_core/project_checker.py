@@ -13,7 +13,12 @@ RESOURCE_RE = re.compile(r'\{[0-9A-Fa-f]{16}\}[^"\s]+')
 PLACEHOLDER = "WORKBENCH_GUID_REQUIRED"
 VEHICLE_METAL = "{CE9253778DD8FBDE}Common/Materials/Game/metal.gamemat"
 TIRE_RUBBER = "{8F1BCCA995D7FA4B}Common/Materials/Game/rubber_tire.gamemat"
+TIRE_RUBBER_4MM = "{C2BF4F9689827271}Common/Materials/Game/RubberTire/rubber_tire_4mm_min.gamemat"
 FIREGEO_METAL = "{EDB153DC99889624}Common/Materials/Game/Metal/metal_3mm.gamemat"
+WHEEL_METAL = "{1950188BB10D20EA}Common/Materials/Game/Metal/metal_5mm.gamemat"
+LIGHT_PLASTIC = "{C17486F3DA1510F6}Common/Materials/Game/Plastic/plastic_3mm.gamemat"
+THIN_GLASS = "{8D1F0255D835F302}Common/Materials/Game/Glass/glass_2mm_min.gamemat"
+FABRIC = "{5EE22D6E62DCE04A}Common/Materials/Game/Fabric/fabric_6mm_min.gamemat"
 ARMORED_METAL = "{469B8DA92D8109EC}Common/Materials/Game/Metal/metal_10mm_min.gamemat"
 ARMORED_GLASS = (
     "{7BE37DA4E6BA2358}Common/Materials/Game/GlassArmored/glass_armored_10mm.gamemat"
@@ -27,6 +32,24 @@ COMPONENT_MATERIALS = {
     "FuelTank": "{2E934203697527B6}Common/Materials/Game/VehicleParts/fuel_tank.gamemat",
     "Gearbox": "{427C6C77966E41CB}Common/Materials/Game/VehicleParts/differential.gamemat",
 }
+PLASTIC_NAME_HINTS = (
+    "plastic", "panel", "trim", "bumper", "fender_flare", "grille",
+)
+GLASS_NAME_HINTS = (
+    "glass", "window", "windscreen", "windshield", "lamp", "lamps", "light",
+    "led", "indicator", "blinker", "amber", "mirror",
+)
+FABRIC_NAME_HINTS = (
+    "fabric", "cloth", "carpet", "leather", "seat",
+)
+RUBBER_NAME_HINTS = (
+    "rubber", "tire", "tyre",
+)
+METAL_NAME_HINTS = (
+    "metal", "steel", "chrome", "carpaint", "body", "door", "hood", "trunk",
+    "tailgate", "rear", "front", "exterior", "cab", "tray", "undercarriage",
+    "chassis", "diamond", "diamont",
+)
 GEOMETRY_PARAM_RE = re.compile(
     r"(?P<header>    GeometryParam (?P<name>\S+) \{\n)"
     r"(?P<body>.*?)(?=    GeometryParam |\n   \})",
@@ -34,16 +57,40 @@ GEOMETRY_PARAM_RE = re.compile(
 )
 
 
+def _name_has(name: str, hints: tuple[str, ...]) -> bool:
+    lower = name.lower()
+    return any(hint in lower for hint in hints)
+
+
+def inferred_vehicle_detail_surface(name: str, default_metal: str) -> list[str]:
+    """Map generated collision names to valid stock gamemats, never render mats."""
+    if _name_has(name, RUBBER_NAME_HINTS):
+        return [TIRE_RUBBER_4MM]
+    if _name_has(name, GLASS_NAME_HINTS):
+        return [THIN_GLASS]
+    if _name_has(name, PLASTIC_NAME_HINTS):
+        return [LIGHT_PLASTIC]
+    if _name_has(name, FABRIC_NAME_HINTS):
+        return [FABRIC]
+    return [default_metal]
+
+
 def expected_vehicle_layer_preset(name: str) -> str | None:
     """Return the stock Enfusion layer preset implied by a vehicle collider name."""
     if name.startswith("UCL_MT_"):
         return "MineTrigger"
+    if name.startswith("UCL_VC_"):
+        return "VehicleComplex"
+    if name.startswith("UTM_VC_"):
+        return "VehicleComplex"
     if name.startswith("UCX_MainCol_"):
         return "Vehicle"
     if name.startswith("UCX_FG_"):
         return "FireGeo"
-    if name.startswith("UTM_Glass") or name == "UTM_Detail_Glass":
+    if name.startswith("UTM_GlassFire") or name == "UTM_Detail_Glass":
         return "GlassFire"
+    if name.startswith("UTM_Glass"):
+        return "FireGeo"
     if name.startswith("UTM_"):
         return "FireGeo"
     return None
@@ -100,16 +147,52 @@ def expected_vehicle_surface_properties(name: str, armored_body: bool = False) -
     """Return valid stock game-material resources for a vehicle collider."""
     if name.startswith("UCL_MT_"):
         return [TIRE_RUBBER]
+    if name.startswith("UCL_VC_"):
+        return [TIRE_RUBBER_4MM]
+    if name.startswith("UTM_VC_"):
+        return inferred_vehicle_detail_surface(name, WHEEL_METAL)
     if name.startswith("UCX_MainCol_"):
         return [VEHICLE_METAL]
+    if name.startswith("UTM_FG_Wheel") and _name_has(name, ("tire", "tyre", "rubber")):
+        return [TIRE_RUBBER_4MM]
+    if name.startswith("UTM_FG_Wheel") and _name_has(name, ("rim", "hub", "middle", "metal", "inner")):
+        return [WHEEL_METAL]
+    if name.startswith("UTM_FG_Wheel"):
+        return [TIRE_RUBBER_4MM, WHEEL_METAL]
     for component, material in COMPONENT_MATERIALS.items():
         if name in (f"UCX_FG_{component}", f"UTM_FG_{component}"):
             return [material]
+    if name.startswith("UTM_FG_Light") or name.startswith("UCX_FG_Light"):
+        return [LIGHT_PLASTIC]
     if name.startswith("UTM_Glass") or name == "UTM_Detail_Glass":
         return [ARMORED_GLASS if armored_body else LAMINATED_GLASS]
     if name.startswith("UTM_"):
-        return [ARMORED_METAL if armored_body else FIREGEO_METAL]
+        return inferred_vehicle_detail_surface(
+            name,
+            ARMORED_METAL if armored_body else FIREGEO_METAL,
+        )
     return []
+
+
+def vehicle_surface_property_issues(
+    text: str, armored_body: bool = False
+) -> list[tuple[str, list[str], list[str]]]:
+    """List collider surface-property blocks missing required SampleCar gamemats."""
+    issues: list[tuple[str, list[str], list[str]]] = []
+    for match in GEOMETRY_PARAM_RE.finditer(text):
+        name = match.group("name")
+        expected = expected_vehicle_surface_properties(name, armored_body)
+        if not expected:
+            continue
+        surface_match = re.search(
+            r"     SurfaceProperties \{\n(?P<body>.*?)\n     \}",
+            match.group("body"),
+            re.DOTALL,
+        )
+        actual = RESOURCE_RE.findall(surface_match.group("body")) if surface_match else []
+        if any(resource not in actual for resource in expected):
+            issues.append((name, actual, expected))
+    return issues
 
 
 def repair_vehicle_surface_properties(
@@ -126,6 +209,14 @@ def repair_vehicle_surface_properties(
         if not expected:
             return match.group(0)
         body = match.group("body")
+        surface_match = re.search(
+            r"     SurfaceProperties \{\n(?P<body>.*?)\n     \}",
+            body,
+            re.DOTALL,
+        )
+        actual = RESOURCE_RE.findall(surface_match.group("body")) if surface_match else []
+        if actual and all(resource in actual for resource in expected):
+            return match.group(0)
         replacement = "     SurfaceProperties {\n"
         replacement += "".join(f'      "{resource}"\n' for resource in expected)
         replacement += "     }"
@@ -136,6 +227,13 @@ def repair_vehicle_surface_properties(
             count=1,
             flags=re.DOTALL,
         )
+        if not count:
+            insert_at = body.find("     Mass ")
+            if insert_at >= 0:
+                new_body = body[:insert_at] + replacement + "\n" + body[insert_at:]
+            else:
+                new_body = replacement + "\n" + body
+            count = 1
         if count and new_body != body:
             changed.append(name)
         return match.group("header") + new_body
@@ -257,6 +355,20 @@ def check_project(project: VehicleProject) -> CheckReport:
                 "Apply safe metadata fixes, then rebuild the XOB in Workbench.",
             )
         report.facts["collider_layer_preset_issues"] = layer_issues
+        surface_issues = vehicle_surface_property_issues(text)
+        if surface_issues:
+            evidence = ", ".join(
+                f"{name}: {len(actual)} material(s) -> {len(expected)} expected"
+                for name, actual, expected in surface_issues[:8]
+            )
+            report.add(
+                "meta.collider_surface_properties",
+                "error",
+                f"Invalid vehicle collider surface properties: {evidence}",
+                True,
+                "Apply safe metadata fixes, then rebuild the XOB in Workbench.",
+            )
+        report.facts["collider_surface_property_issues"] = surface_issues
     else:
         report.add("meta.master.exists", "warning", f"Missing {meta.name}", False,
                    "Export/import the master FBX before final validation.")

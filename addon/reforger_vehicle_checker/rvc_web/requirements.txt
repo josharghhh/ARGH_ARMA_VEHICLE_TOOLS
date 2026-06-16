@@ -1,2 +1,3 @@
-fastapi>=0.110,<1
-uvicorn>=0.29,<1
+# The build/import web tool now runs on the Python standard library only
+# (http.server). No external packages are required — it runs inside Blender's
+# bundled Python with zero installs.
