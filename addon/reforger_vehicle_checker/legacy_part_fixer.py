@@ -98,6 +98,8 @@ COLL_COLORS = {
 PFX = "Police_Interceptor_SUV"
 
 VEHICLE_GAMEMAT = "{CE9253778DD8FBDE}Common/Materials/Game/metal.gamemat"
+VEHICLE_BODY_GAMEMAT = "{D3A4A761377F28DE}Common/Materials/Game/VehicleParts/vehicle_body.gamemat"
+VEHICLE_BOTTOM_GAMEMAT = "{D9FA05910FD9A1AB}Common/Materials/Game/VehicleParts/vehicle_body_bottom_slide.gamemat"
 TIRE_GAMEMAT = "{8F1BCCA995D7FA4B}Common/Materials/Game/rubber_tire.gamemat"
 TIRE_4MM_GAMEMAT = "{C2BF4F9689827271}Common/Materials/Game/RubberTire/rubber_tire_4mm_min.gamemat"
 FIREGEO_METAL_GAMEMAT = "{EDB153DC99889624}Common/Materials/Game/Metal/metal_3mm.gamemat"
@@ -112,7 +114,54 @@ COMPONENT_GAMEMATS = {
     "Engine": "{0B9EB7B9C8DCC6A5}Common/Materials/Game/VehicleParts/engine.gamemat",
     "FuelTank": "{2E934203697527B6}Common/Materials/Game/VehicleParts/fuel_tank.gamemat",
     "Gearbox": "{427C6C77966E41CB}Common/Materials/Game/VehicleParts/differential.gamemat",
+    "Differential": "{427C6C77966E41CB}Common/Materials/Game/VehicleParts/differential.gamemat",
+    "DriveShaft": "{BAD01E74E21D5031}Common/Materials/Game/VehicleParts/drive_shaft.gamemat",
 }
+COLLIDER_LAYER_PRESET_ITEMS = (
+    ('Vehicle', "Vehicle", "Main rigid vehicle collision"),
+    ('FireGeo', "FireGeo", "Damage and hit geometry"),
+    ('VehicleComplex', "VehicleComplex", "Wheel slot/detail collision"),
+    ('MineTrigger', "MineTrigger", "Wheel mine trigger collision"),
+    ('GlassFire', "GlassFire", "Legacy/master glass fire layer"),
+    ('Glass', "Glass", "Glass view/collision preset"),
+    ('VehicleFire', "VehicleFire", "Vehicle fire hit layer"),
+    ('VehicleFireView', "VehicleFireView", "Vehicle fire/view layer"),
+    ('VehicleComplexView', "VehicleComplexView", "Vehicle complex view layer"),
+    ('VehicleSimple', "VehicleSimple", "Simple vehicle layer"),
+    ('VehicleRotorDisc', "VehicleRotorDisc", "Rotor disc layer"),
+    ('Door', "Door", "Door interaction/collision layer"),
+    ('DoorFireView', "DoorFireView", "Door fire/view layer"),
+    ('FireView', "FireView", "Fire/view layer"),
+    ('ViewGeo', "ViewGeo", "View geometry layer"),
+    ('Interaction', "Interaction", "Interaction layer"),
+    ('InteractionFireGeo', "InteractionFireGeo", "Interaction FireGeo layer"),
+    ('Prop', "Prop", "Prop layer"),
+    ('PropFireView', "PropFireView", "Prop fire/view layer"),
+    ('Default', "Default", "Default layer preset"),
+    ('None', "None", "No collision layer preset"),
+)
+COLLIDER_GAMEMAT_PRESETS = (
+    ('NO_CHANGE', "No material change", "Keep existing material slots", ""),
+    ('AUTO_POLICY', "Auto vehicle policy", "Use this addon's SampleCar vehicle policy", ""),
+    ('VEHICLE_METAL', "Vehicle Metal", "Generic metal vehicle hull", VEHICLE_GAMEMAT),
+    ('VEHICLE_BODY', "Vehicle Body", "Vehicle body panels", VEHICLE_BODY_GAMEMAT),
+    ('VEHICLE_BOTTOM', "Vehicle Bottom Slide", "Vehicle underside/bottom slide", VEHICLE_BOTTOM_GAMEMAT),
+    ('METAL_3MM', "Metal 3mm", "Thin metal FireGeo", FIREGEO_METAL_GAMEMAT),
+    ('METAL_5MM', "Metal 5mm", "Wheel rim or stronger metal", WHEEL_METAL_GAMEMAT),
+    ('RUBBER_TIRE', "Rubber Tire", "Generic tire rubber", TIRE_GAMEMAT),
+    ('RUBBER_TIRE_4MM', "Rubber Tire 4mm", "Sample wheel VehicleComplex tire rubber", TIRE_4MM_GAMEMAT),
+    ('PLASTIC_3MM', "Plastic 3mm", "Light covers, trims, plastic panels", LIGHT_PLASTIC_GAMEMAT),
+    ('GLASS_2MM', "Glass 2mm", "Thin glass", THIN_GLASS_GAMEMAT),
+    ('GLASS_LAMINATED', "Laminated Glass", "Default DST vehicle glass", LAMINATED_GLASS_GAMEMAT),
+    ('GLASS_ARMORED', "Armored Glass", "Armored DST glass", ARMORED_GLASS_GAMEMAT),
+    ('FABRIC_6MM', "Fabric 6mm", "Seats, carpet, soft interior", FABRIC_GAMEMAT),
+    ('ENGINE', "Vehicle Engine", "Engine component hit material", COMPONENT_GAMEMATS["Engine"]),
+    ('BATTERY', "Vehicle Battery", "Battery component hit material", COMPONENT_GAMEMATS["Battery"]),
+    ('FUEL_TANK', "Fuel Tank", "Fuel tank component hit material", COMPONENT_GAMEMATS["FuelTank"]),
+    ('DIFFERENTIAL', "Differential", "Differential/gearbox vehicle part", COMPONENT_GAMEMATS["Differential"]),
+    ('DRIVE_SHAFT', "Drive Shaft", "Drive shaft vehicle part", COMPONENT_GAMEMATS["DriveShaft"]),
+)
+COLLIDER_GAMEMAT_BY_KEY = {key: resource for key, _label, _desc, resource in COLLIDER_GAMEMAT_PRESETS}
 ENFUSION_LAYER_COLORS = {
     "Vehicle": (1.0, 0.42, 0.0, 0.62),
     "FireGeo": (1.0, 0.05, 0.0, 0.72),
@@ -543,7 +592,10 @@ def _gamemat_material(resource):
         material = bpy.data.materials.new(name)
         material.diffuse_color = (0.95, 0.55, 0.08, 0.55)
     material["rpf_gamemat"] = resource
+    material["rpf_gamemat_resource"] = resource
     material["ebt_resource_name"] = resource
+    material["resourceName"] = resource
+    material["ResourceName"] = resource
     try:
         material.ebt_resource_name = resource
     except Exception:
@@ -551,19 +603,95 @@ def _gamemat_material(resource):
     return material
 
 
+def _gamemat_resource_from_material(material):
+    if material is None:
+        return ""
+    for key in ("rpf_gamemat", "rpf_gamemat_resource", "ebt_resource_name",
+                "resourceName", "ResourceName"):
+        value = material.get(key)
+        if isinstance(value, str) and ".gamemat" in value:
+            return value
+    value = getattr(material, "ebt_resource_name", "")
+    if isinstance(value, str) and ".gamemat" in value:
+        return value
+    name = material.name
+    if ".gamemat" in name and "Common/Materials/Game/" in name:
+        return name
+    return ""
+
+
+def _sync_collider_surface_properties(obj):
+    resources = []
+    if obj.type == 'MESH':
+        for material in obj.data.materials:
+            resource = _gamemat_resource_from_material(material)
+            if resource and resource not in resources:
+                resources.append(resource)
+    obj["rpf_surface_properties"] = "|".join(resources)
+    return resources
+
+
+def _collider_layer_items(_self, _context):
+    return COLLIDER_LAYER_PRESET_ITEMS
+
+
+def _collider_gamemat_items(_self, _context):
+    return tuple((key, label, desc) for key, label, desc, _resource in COLLIDER_GAMEMAT_PRESETS)
+
+
+def _assign_collider_material_slots(obj, resources, clear=True):
+    if obj.type != 'MESH':
+        return []
+    if clear:
+        obj.data.materials.clear()
+    slot_indices = []
+    for resource in resources:
+        material = _gamemat_material(resource)
+        if material.name not in [mat.name for mat in obj.data.materials if mat]:
+            obj.data.materials.append(material)
+        slot_indices.append(max(0, list(obj.data.materials).index(material)))
+    if clear and slot_indices:
+        for polygon in obj.data.polygons:
+            polygon.material_index = slot_indices[min(polygon.material_index, len(slot_indices) - 1)]
+    return _sync_collider_surface_properties(obj)
+
+
+def _selected_collider_objects(context):
+    return [
+        obj for obj in context.selected_objects
+        if obj.type == 'MESH' and obj.name.startswith(COLLISION_PFX)
+    ]
+
+
+def _assign_selected_utm_faces_material(context, resource):
+    obj = context.object
+    if not obj or obj.type != 'MESH' or not obj.name.startswith("UTM_"):
+        return 0
+    mesh = obj.data
+    material = _gamemat_material(resource)
+    if material.name not in [mat.name for mat in mesh.materials if mat]:
+        mesh.materials.append(material)
+    material_index = list(mesh.materials).index(material)
+    bm = bmesh.from_edit_mesh(mesh)
+    count = 0
+    for face in bm.faces:
+        if face.select:
+            face.material_index = material_index
+            count += 1
+    bmesh.update_edit_mesh(mesh)
+    _sync_collider_surface_properties(obj)
+    return count
+
+
 def _apply_vehicle_collision_materials(obj, armored_body=False):
     usage = _collider_usage(obj.name)
     resources = _vehicle_surface_properties(obj.name, armored_body)
     _place_ebt_collider(obj, usage)
     obj["usage"] = usage
-    obj["rpf_surface_properties"] = "|".join(resources)
     if not resources:
+        _sync_collider_surface_properties(obj)
         return usage, []
-    obj.data.materials.clear()
-    for resource in resources:
-        obj.data.materials.append(_gamemat_material(resource))
-    for polygon in obj.data.polygons:
-        polygon.material_index = min(polygon.material_index, len(resources) - 1)
+    _assign_collider_material_slots(obj, resources, clear=True)
     return usage, resources
 
 
@@ -1368,6 +1496,71 @@ class RPF_OT_apply_collision_materials(bpy.types.Operator):
         if missing:
             msg += f"; {len(missing)} had no gamemat rule"
         self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class RPF_OT_collider_setup(bpy.types.Operator):
+    bl_idname = "rpf.collider_setup"
+    bl_label = "Collider Setup"
+    bl_description = ("Assign an Enfusion layer preset and stock game material to selected "
+                      "colliders. In Edit Mode on UTM meshes, only selected faces get the gamemat")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode == 'EDIT_MESH':
+            obj = context.object
+            return bool(obj and obj.type == 'MESH' and obj.name.startswith("UTM_"))
+        return any(obj.type == 'MESH' and obj.name.startswith(COLLIDER_PFX)
+                   for obj in context.selected_objects)
+
+    def execute(self, context):
+        scene = context.scene
+        layer = scene.rpf_collider_setup_layer
+        material_key = scene.rpf_collider_setup_gamemat
+        sort = scene.rpf_collider_setup_sort
+        resource = COLLIDER_GAMEMAT_BY_KEY.get(material_key, "")
+
+        if context.mode == 'EDIT_MESH':
+            obj = context.object
+            if not obj or obj.type != 'MESH' or not obj.name.startswith("UTM_"):
+                self.report({'ERROR'}, "Edit Mode collider setup needs an active UTM mesh")
+                return {'CANCELLED'}
+            obj["usage"] = layer
+            if material_key == 'AUTO_POLICY':
+                self.report({'ERROR'}, "Auto vehicle policy works in Object Mode; choose a specific gamemat for selected UTM faces")
+                return {'CANCELLED'}
+            face_count = 0
+            if resource:
+                face_count = _assign_selected_utm_faces_material(context, resource)
+                if face_count == 0:
+                    self.report({'ERROR'}, "No selected UTM faces to assign")
+                    return {'CANCELLED'}
+            else:
+                _sync_collider_surface_properties(obj)
+            self.report({'INFO'}, f"{obj.name}: {layer}, {face_count} selected faces")
+            return {'FINISHED'}
+
+        targets = _selected_collider_objects(context)
+        if not targets:
+            self.report({'ERROR'}, "Select one or more collider objects")
+            return {'CANCELLED'}
+
+        for obj in targets:
+            if material_key == 'AUTO_POLICY':
+                _apply_vehicle_collision_materials(obj, scene.rpf_collider_setup_armored)
+                continue
+            obj["usage"] = layer
+            if sort:
+                _place_ebt_collider(obj, layer)
+            else:
+                obj.color = ENFUSION_LAYER_COLORS_IDLE.get(layer, (1.0, 0.5, 0.0, 0.4))
+            if resource:
+                _assign_collider_material_slots(obj, [resource], clear=True)
+            else:
+                _sync_collider_surface_properties(obj)
+
+        self.report({'INFO'}, f"collider setup applied to {len(targets)} object(s)")
         return {'FINISHED'}
 
 
@@ -6570,10 +6763,13 @@ def _draw_collision_review_controls(layout, scene):
     if selected:
         obj = selected[0]
         usage = obj.get("usage", _collider_usage(obj.name))
-        surfaces = obj.get("rpf_surface_properties", "")
+        surfaces = obj.get("rpf_surface_properties", "") or "|".join(_sync_collider_surface_properties(obj))
         layout.label(text=f"{obj.name}: {usage}", icon='MATERIAL')
         if surfaces:
-            layout.label(text=surfaces.split("|")[0][:96], icon='INFO')
+            parts = surfaces.split("|")
+            layout.label(text=parts[0][:96], icon='INFO')
+            if len(parts) > 1:
+                layout.label(text=f"+ {len(parts) - 1} more surface material(s)", icon='MATERIAL')
 
 
 class RPF_PT_panel(bpy.types.Panel):
@@ -6813,6 +7009,19 @@ class RPF_PT_panel(bpy.types.Panel):
                 cbox.prop(sc, "rpf_ucx_replace_existing", text="Replace existing generated UCX")
                 cbox.operator("rpf.convexify_selected_ucx", icon='MESH_ICOSPHERE')
 
+            mbox = _draw_accordion(l, sc, "rpf_ui_build_materials", "Collider Materials", 'MATERIAL')
+            if mbox:
+                row = mbox.row(align=True)
+                row.prop(sc, "rpf_collider_setup_layer", text="Layer")
+                row.prop(sc, "rpf_collider_setup_gamemat", text="Gamemat")
+                row = mbox.row(align=True)
+                row.prop(sc, "rpf_collider_setup_sort", text="Sort into collections")
+                row.prop(sc, "rpf_collider_setup_armored", text="Armored policy")
+                row = mbox.row(align=True)
+                row.operator("rpf.collider_setup", text="Apply To Selected", icon='MATERIAL')
+                row.operator("rpf.apply_collision_materials", text="Auto Vehicle Policy", icon='AUTO')
+                mbox.label(text="Edit Mode on UTM: assigns gamemat to selected faces only.", icon='INFO')
+
             vbox = _draw_accordion(l, sc, "rpf_ui_build_vhacd", "V-HACD multi-hull (collision / LOD geo)", 'MOD_REMESH')
             if vbox:
                 vbox.prop(sc, "rpf_ucx_backend", text="Backend")
@@ -6927,6 +7136,7 @@ class RPF_PT_panel(bpy.types.Panel):
 CLASSES = (RPF_OT_discover, RPF_OT_build_colliders, RPF_OT_build_firegeo,
            RPF_OT_selected_parts_to_ucx, RPF_OT_validate_ucx,
            RPF_OT_selected_faces_to_ucx, RPF_OT_apply_collision_materials,
+           RPF_OT_collider_setup,
            RPF_OT_autotune_collision_settings,
            RPF_OT_convexify_selected_ucx,
            RPF_OT_analyze_vehicle_parts, RPF_OT_select_semantic_group,
@@ -6985,6 +7195,7 @@ def register():
         ("rpf_ui_build_analysis", "Build smart part analysis"),
         ("rpf_ui_build_oneclick", "Build one-click physics"),
         ("rpf_ui_build_ucx", "Build UCX collision"),
+        ("rpf_ui_build_materials", "Build collider material setup"),
         ("rpf_ui_build_vhacd", "Build V-HACD controls"),
         ("rpf_ui_build_vhacd_advanced", "Build advanced V-HACD controls"),
         ("rpf_ui_build_geometry", "Build geometry parts"),
@@ -7161,6 +7372,24 @@ def register():
         name="Grouped collision categories",
         default="exterior,cab,rear_area,hood,undercarriage,door_FL,door_FR,door_RL,door_RR,door_trunk",
         description="Comma-separated part/category names decomposed by 1-click V-HACD/CoACD")
+    bpy.types.Scene.rpf_collider_setup_layer = bpy.props.EnumProperty(
+        name="Layer preset",
+        default='FireGeo',
+        items=_collider_layer_items,
+        description="Enfusion collision layer preset to write to selected colliders")
+    bpy.types.Scene.rpf_collider_setup_gamemat = bpy.props.EnumProperty(
+        name="Game material",
+        default='NO_CHANGE',
+        items=_collider_gamemat_items,
+        description="Stock Enfusion gamemat assigned to selected colliders or selected UTM faces")
+    bpy.types.Scene.rpf_collider_setup_sort = bpy.props.BoolProperty(
+        name="Sort into collections",
+        default=True,
+        description="Move selected colliders into Colliders/<LayerPreset> like Enfusion Blender Tools")
+    bpy.types.Scene.rpf_collider_setup_armored = bpy.props.BoolProperty(
+        name="Armored body/glass policy",
+        default=False,
+        description="When using Auto vehicle policy, use armored glass/body choices where applicable")
     bpy.types.Scene.rpf_direct_copy_ratio = bpy.props.FloatProperty(
         name="Direct copy ratio", default=1.0, min=0.01, max=1.0, precision=3,
         description="Decimation ratio for selected render meshes copied directly to FireGeo/detail collision")
