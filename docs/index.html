@@ -3,41 +3,44 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Beginner-friendly Blender tools for preparing and checking Arma Reforger vehicles.">
+  <meta name="description" content="Blender tools for preparing, checking, and exporting Arma Reforger wheeled vehicles.">
   <title>Reforger Vehicle Tools</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="hero">
-    <nav><strong>Reforger Vehicle Tools</strong><a href="#install">Install</a><a href="#workflow">Workflow</a><a href="#collision">Collision</a><a href="BEGINNER_GUIDE.html">Full Guide</a></nav>
+    <nav><strong>Reforger Vehicle Tools</strong><a href="#install">Install</a><a href="#features">Features</a><a href="#workflow">Workflow</a><a href="BEGINNER_GUIDE.html">Usage Guide</a></nav>
     <div class="hero-copy">
       <p class="eyebrow">BLENDER TO ENFUSION VEHICLE PIPELINE</p>
-      <h1>Prepare vehicles without guessing what Enfusion expects.</h1>
-      <p class="lead">Part organization, SampleCar-style rigging, true-convex UCX physics, FireGeo review, validation, safe repairs, and checked export.</p>
-      <div class="actions"><a class="button" href="downloads/reforger_vehicle_checker.zip">Download Addon ZIP</a><a class="button secondary" href="BEGINNER_GUIDE.html">Read Beginner Guide</a></div>
+      <h1>Prepare Arma Reforger vehicles with clear export profiles.</h1>
+      <p class="lead">Organize parts, build a SampleCar-style rig, create valid collision, validate resources, and export master, glass, wheel, and light FBXs separately.</p>
+      <div class="actions"><a class="button" href="downloads/reforger_vehicle_checker.zip">Download Addon ZIP</a><a class="button secondary" href="BEGINNER_GUIDE.html">Read Usage Guide</a></div>
     </div>
   </header>
   <main>
-    <section class="cards">
-      <article><span>01</span><h2>Vehicle Part Fixer</h2><p>Organize source meshes, review doors, build the rig, place memory points, create collision, and export.</p></article>
-      <article><span>02</span><h2>Vehicle Checker</h2><p>Detect broken bindings and missing vehicle requirements before they become Workbench problems.</p></article>
-      <article><span>03</span><h2>Collision Review</h2><p>Switch between model, UCX, FireGeo, and combined views. Validate real convexity before export.</p></article>
+    <section id="features" class="cards">
+      <article><span>01</span><h2>Part Fixer</h2><p>Assign meshes to exterior, interior, doors, glass, lights, wheels, and mechanical groups.</p></article>
+      <article><span>02</span><h2>Rig And Memory</h2><p>Build SampleCar-style bones and place crew, glass, light, wheel, and effect points.</p></article>
+      <article><span>03</span><h2>Collision</h2><p>Create and review Vehicle, FireGeo, MineTrigger, glass, wheel, and component colliders.</p></article>
+      <article><span>04</span><h2>Validation</h2><p>Check binding, required colliders, wheel slots, GUID references, layer presets, and game materials.</p></article>
+      <article><span>05</span><h2>Export Profiles</h2><p>Export master vehicle, DST glass, wheel parts, and light parts as separate FBX sets.</p></article>
+      <article><span>06</span><h2>Textures</h2><p>Pack selected material sources into Enfusion BCR and DirectX NMO texture files.</p></article>
     </section>
     <section id="install">
-      <p class="eyebrow">INSTALLATION</p><h2>From download to Blender in five steps</h2>
+      <p class="eyebrow">INSTALLATION</p><h2>Install the Blender addon</h2>
       <ol><li>Download <code>reforger_vehicle_checker.zip</code>.</li><li>Open Blender and choose <b>Edit &gt; Preferences &gt; Add-ons</b>.</li><li>Choose <b>Install from Disk</b> and select the ZIP.</li><li>Enable <b>Reforger Vehicle Checker</b>.</li><li>Press <code>N</code> in the 3D Viewport and open the <b>Part Fixer</b> or <b>RVC</b> tab.</li></ol>
     </section>
     <section id="workflow">
-      <p class="eyebrow">SAFE WORKFLOW</p><h2>Work in an order that can be checked</h2>
-      <div class="steps"><div><b>Discover</b><p>Measure and understand the imported model.</p></div><div><b>Organize</b><p>Assign and review movable parts.</p></div><div><b>Rig</b><p>Build and inspect SampleCar-style bones.</p></div><div><b>Collide</b><p>Create simple convex physics and purposeful FireGeo.</p></div><div><b>Validate</b><p>Resolve blocking errors before export.</p></div></div>
+      <p class="eyebrow">WORKFLOW</p><h2>Recommended order</h2>
+      <div class="steps"><div><b>Setup</b><p>Set asset name, export directory, wheelbase, and wheel radius.</p></div><div><b>Organize</b><p>Assign and review vehicle parts before finalizing.</p></div><div><b>Rig</b><p>Build bones, bind rigid parts, and place memory points.</p></div><div><b>Collide</b><p>Create simple convex physics and purposeful FireGeo.</p></div><div><b>Validate</b><p>Resolve blocking RVC errors.</p></div><div><b>Export</b><p>Use master, glass, wheel, and light FBX profiles.</p></div></div>
     </section>
     <section id="collision" class="callout">
-      <p class="eyebrow">THE RULE THAT MATTERS</p><h2>A complete vehicle outline is usually not one valid UCX.</h2>
-      <p>Hoods, windshields, roofs, turrets, and rear steps create a concave outline. Build several individually convex blocks that meet at the visible breakpoints. Use <b>Convexify Selected UCX</b> after manual point adjustments and <b>Validate</b> before export.</p>
+      <p class="eyebrow">COLLISION RULE</p><h2>Main vehicle physics must be simple convex blocks.</h2>
+      <p>Use several `UCX_MainCol_*` or `UBX_MainCol_*` hulls. Keep glass, lights, wheels, and wheel `VehicleComplex` in their own slot exports.</p>
     </section>
     <section>
-      <p class="eyebrow">SCREENSHOT GUIDE</p><h2>Visual examples are being prepared</h2>
-      <p>The repository already includes a complete written beginner guide. Screenshots can be added for installation, part review, rigging, UCX side/front/top views, FireGeo, RVC reports, and Workbench import.</p>
+      <p class="eyebrow">SCREENSHOTS</p><h2>TO BE ADDED</h2>
+      <p>Required screenshots are listed in <code>docs/assets/README.md</code>.</p>
     </section>
   </main>
   <footer>Reforger Vehicle Tools. Community tooling for Blender and Arma Reforger.</footer>

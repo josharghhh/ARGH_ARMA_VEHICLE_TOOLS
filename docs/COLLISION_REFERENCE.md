@@ -10,7 +10,7 @@ Use **Part Fixer > Build** after wheel separation, rig placement, and part final
 4. Set the V-HACD/CoACD parameters: max hulls, face cap, input triangle target, concavity, and the advanced VHACD voxel controls when using the `vhacdx` backend.
 5. Run **1-Click** with **Analyze** and **Use V-HACD/CoACD** enabled, or manually select a reviewed group and run **V-HACD -> Multi-Hull UCX**.
 6. For problem areas, enter Edit Mode on the render mesh, select the exact panel/arch/cab region, and run **Edit Faces -> UCX**. Keep **Split islands** enabled for separated panels and hard body breaks.
-7. Stop and inspect `UCX`, `FireGeo`, `Glass`, and wheel/detail review modes. `All Wheel` shows the full wheel collision set; `VehicleComplex` shows all VehicleComplex colliders including `UTM_VC_*` direct-detail copies; `Wheel FireGeo` and `MineTrigger` isolate the other wheel collider jobs.
+7. Stop and inspect `Vehicle`, `Body FireGeo`, `Glass`, `MineTrigger`, `Wheel VC`, `Wheel FireGeo`, and `All Collision` review modes. `All Wheel` shows the full wheel collision set. `Wheel VC` is for wheel-part VehicleComplex only.
 8. Run **Fix Layer + Gamemats**, **Fix UCX Hulls**, and **Validate** before export.
 
 The main physics rule is unchanged: `Vehicle` collision must be multiple convex hulls. Use V-HACD/CoACD for curved or highly concave vehicle shells where broad profile chunks bridge wheel arches or hard body angles.
@@ -29,7 +29,7 @@ The main physics rule is unchanged: `Vehicle` collision must be multiple convex 
 | `UTM_FG_Light_*` | `FireGeo` | plastic or light-cover gamemat |
 | `UCL_MT_wheel_*` | `MineTrigger` | tire rubber gamemat |
 | `UCL_VC_wheel00` | `VehicleComplex` | tire rubber thickness gamemat |
-| direct-copy `UTM_VC_*` | `VehicleComplex` | metal/detail gamemat by default |
+| direct-copy `UTM_VC_*` | advanced only, excluded from master export | do not use for master body/interior collision |
 | `UTM_FG_Wheel_Tire_*` | `FireGeo` | tire rubber gamemat |
 | `UTM_FG_Wheel_Rim_*`, `UTM_FG_Wheel_Hub_*` | `FireGeo` | metal rim gamemat |
 | generic `UTM_FG_Wheel_*` | `FireGeo` | tire rubber plus metal rim gamemats |
@@ -129,7 +129,7 @@ For clean source vehicles, selected render surfaces can be duplicated directly i
 - **Selected -> UCX Copy** creates `UCX_MainCol_*_copy` on the `Vehicle` layer from the selected mesh or selected Edit Mode faces.
 - **Selected -> UTM FireGeo** creates `UTM_FG_*` on the `FireGeo` layer.
 - **Glass** creates `UTM_GlassFire_*` on the `GlassFire` layer for explicit legacy/master glass behavior.
-- **UTM VehicleComplex Detail** creates `UTM_VC_*` on the `VehicleComplex` layer.
+- **Advanced UTM VC** creates `UTM_VC_*` for specialist testing, but the master exporter excludes it by default. Do not use it for full body/interior master collision.
 
 UCX direct copies are intentionally literal copies. Use them for clean convex-ish panels or as a fast starting point, then run **Validate** and **Fix UCX Hulls** before export. Non-convex UCX geometry will still be rejected by the checker.
 
@@ -147,7 +147,14 @@ Collision `SurfaceProperties` must use stock game-material resources, not import
 
 ## Wheels
 
-The master vehicle should contain `UCL_MT_wheel_L01/L02/R01/R02` on `MineTrigger`.
+The master vehicle should contain:
+
+- `UCX_MainCol_*` or `UBX_MainCol_*` on `Vehicle` for simple convex driving physics.
+- `UCL_MT_wheel_L01/L02/R01/R02` on `MineTrigger`.
+- `UCX_FG_Engine`, `UCX_FG_Battery`, `UCX_FG_FuelTank`, and `UCX_FG_Gearbox` on `FireGeo`.
+- Body, interior, glass, and light-cover hit geometry on `FireGeo`/`GlassFire`, not `VehicleComplex`.
+
+Do not export full body, door, interior, or shell copies as `UTM_VC_*` on the master vehicle. `VehicleComplex` belongs to the wheel part contact/detail path.
 
 The optional wheel slot FBX follows the SampleCar pattern:
 
@@ -167,6 +174,21 @@ Wheel slot export modes:
 Wheel visuals are duplicated into temporary centered export copies. The original wheel objects are not moved; the exported mesh is baked around the wheel's actual center so the FBX pivot sits at the tire center. Rear dually meshes should be exported with **Front + Rear** or **Selected Alt** so the rear dual tire spacing remains intact.
 
 Visual road wheels remain in the Blender scene for bone placement and ride-height reference, but they are excluded from the master vehicle FBX. They export only through the separate wheel-slot FBX path with their wheel colliders. Cabin steering wheels are not road wheels; steering aliases are always included in the master render export and bind to `v_steering_wheel`.
+
+## Structured FBX Profiles
+
+Use **RVC > Structured FBX Profiles** for the clean SampleCar-style export split:
+
+| Profile | Output | Includes | Excludes |
+|---|---|---|---|
+| Master | `<Asset>.fbx` | Body/interior/exterior meshes, armature, memory empties, `UCX_MainCol_*`/`UBX_MainCol_*`, `UCL_MT_wheel_*`, component `UCX_FG_*`, body/interior/trunk FireGeo | Doors, road wheels, DST glass, DST lights, wheel `VehicleComplex`, master-body `UTM_VC_*` |
+| Glass | `Dst/<Asset>_Glass_<slot>.fbx` | One file per glass mesh, `Glass_<slot>`, `UTM_Glass`, `snap_glass` | Master body and wheel collision |
+| Wheels | `VehParts/<Asset>_Wheel_<slot>.fbx` | One file per wheel mesh, `Wheel_<slot>`, `UCL_VC_wheel00` | Master vehicle body and glass/light slots |
+| Lights | `Lights/<Asset>_Light_<slot>.fbx` | One file per light mesh, `Light_<slot>`, `UTM_FG_Light_<slot>`, `snap_light` | Master body and glass slots |
+
+The exporter resolves slots from names such as `glass_FL`, `glass_FR`, `glass_RL`, `glass_RR`, `glass_F`, `glass_R`, `headlight_L`, `brakelight_R`, and wheel names. If a matching `snap_glass_<slot>` or `snap_light_<slot>` empty exists, the slot export includes it as `snap_glass` or `snap_light`; otherwise it falls back to the mesh bounding-box center.
+
+This split is deliberate. The master vehicle should never carry full glass, light, wheel, or non-wheel `UTM_VC_*` detail collision. Those belong to their slot FBXs so the runtime prefab can attach them through explicit wheel, glass, and light slots.
 
 ## Validation
 

@@ -1,313 +1,335 @@
-# Absolute Beginner Guide
+# Tool Usage Guide
 
-This guide assumes you have a vehicle model in Blender but have never prepared an Arma Reforger vehicle.
+This guide covers the current Blender addon workflow for Arma Reforger wheeled vehicles.
 
-## 1. Understand The Different Types Of Geometry
-
-Your vehicle contains several different kinds of objects. They do different jobs and must not be confused.
-
-| Type | Purpose | Typical names |
-|---|---|---|
-| Visual model | What the player sees | `exterior`, `interior`, `door_FL` |
-| Vehicle physics | What stops the vehicle hitting the world | `UCX_MainCol_*`, `UBX_*` |
-| Mine trigger | Wheel areas used for mine interaction | `UCL_MT_wheel_*` |
-| FireGeo | Where bullets and damage hit | `UCX_FG_*`, `UTM_FG_*` |
-| Glass FireGeo | Bullet interaction for glass | `UTM_Glass*` |
-| Memory points | Invisible positions for seats, lights, and actions | empties such as `driver_idle` |
-| Armature | Bones that move wheels, doors, gauges, and controls | `Armature`, `v_body`, `v_door_l01` |
-
-The visual model can be detailed. Vehicle physics should be simple.
-
-## 2. Install The Addon
+## Install
 
 1. Open Blender.
-2. Choose **Edit > Preferences > Add-ons**.
-3. Choose **Install from Disk**.
-4. Select `reforger_vehicle_checker.zip`.
+2. Open **Edit > Preferences > Add-ons**.
+3. Select **Install from Disk**.
+4. Choose `reforger_vehicle_checker.zip`.
 5. Enable **Reforger Vehicle Checker**.
-6. Close Preferences.
-7. In the 3D Viewport, press `N`.
+6. Press `N` in the 3D Viewport.
 
-You should now see:
+The addon adds two tabs:
 
-- **Part Fixer**: the main preparation workflow.
-- **RVC**: checks, safe fixes, texture packing, and checked export.
+- **Part Fixer**: mesh organization, rigging, memory points, collision, and legacy export tools.
+- **RVC**: checks, safe fixes, texture packing, structured FBX profiles, and the optional web helper.
 
-## 3. Make A Safety Copy
+## Geometry Types
 
-Before pressing preparation buttons:
+| Type | Purpose | Names |
+|---|---|---|
+| Visual body | What players see | `exterior`, `interior`, `door_FL` |
+| Main vehicle physics | Driving/blocking collision | `UCX_MainCol_*`, `UBX_MainCol_*` |
+| Mine triggers | Wheel mine interaction | `UCL_MT_wheel_L01/R01/L02/R02` |
+| FireGeo | Bullet and damage hits | `UCX_FG_*`, `UTM_FG_*` |
+| DST glass | Slot-mounted windows | `Glass_FL`, `UTM_Glass`, `snap_glass` |
+| Wheel part | Slot-mounted wheel | `Wheel_FL`, `UCL_VC_wheel00` |
+| Light part | Slot-mounted lights | `Light_FL`, `UTM_FG_Light_FL`, `snap_light` |
+| Memory points | Positions used by scripts/prefabs | empties such as `driver_idle`, `snap_glass_FL` |
+| Armature | Vehicle animation skeleton | `v_body`, `v_wheel_l01`, `v_door_l01` |
 
-1. Choose **File > Save As**.
-2. Save a working copy with a clear name.
-3. Keep the original source model unchanged.
+## Basic Workflow
 
-Many tool actions automatically create checkpoint `.blend` files. Keep them until the vehicle works in Workbench.
+1. Save a working copy of the vehicle `.blend`.
+2. Set **Part Fixer > Setup > Asset** and **Export**.
+3. Enter real wheelbase and wheel radius.
+4. Run **Discover**.
+5. Organize and review parts.
+6. Build/review the rig.
+7. Add memory points.
+8. Build required collision.
+9. Review collision views.
+10. Run **RVC > Check Vehicle**.
+11. Fix blocking errors.
+12. Export with **RVC > Structured FBX Profiles**.
+13. Import/rebuild in Workbench.
+14. Test the vehicle in game.
 
-## 4. Learn Blender Selection Basics
+## Part Fixer > Setup
 
-- Left-click selects an object.
-- `Shift` + left-click adds or removes objects from the selection.
-- `A` selects everything.
-- `Alt+A` deselects everything.
-- Numpad `1`, `3`, and `7` show front, side, and top views.
-- Press `N` to open the tool sidebar.
+Use this tab first.
 
-If a button says **Selected**, it only affects objects you selected.
+- **Asset**: file/resource base name, for example `Begal`.
+- **Export**: addon asset folder for FBX output.
+- **Wheelbase**: front axle center to rear axle center in meters.
+- **Wheel radius**: tire radius in meters.
+- **Discover**: measures the vehicle and reports likely parts.
+- **Auto-Setup**: scales and assigns source meshes into collections.
+- **Organize**: applies predictable part grouping and names.
+- **Apply Textures**: applies imported texture/material sources.
+- **Check Transforms**: finds bad object transforms before rig/export.
 
-## 5. Setup Tab
+Screenshot: TO BE ADDED
 
-Open **Part Fixer > Setup**.
+## Part Fixer > Parts
 
-### Asset
+Use this tab to correct part assignment before rigging.
 
-Enter a short asset name without spaces. Example: `ArmoredTruck`.
+- **Quick Select**: selects all objects in a part group.
+- **Review**: isolates or ghosts the active part.
+- **Door Test-Open**: rotates a door group to expose wrong assignments.
+- **Add Selected**: moves selected objects into the active part.
+- **Finalize**: joins reviewed part groups into final named objects.
 
-### Export
+Do not finalize until doors, windows, wheels, lights, interior, and exterior are assigned correctly.
 
-Choose the folder inside your Reforger addon where exported vehicle assets should be written.
+Screenshot: TO BE ADDED
 
-### Wheelbase
+## Rig
 
-Enter the real distance in meters between the front and rear axle centers.
+The vehicle rig follows the SampleCar-style bone contract.
 
-### Wheel Radius
+Important bones:
 
-Enter the tire radius in meters, not the diameter.
+- `v_root`
+- `v_body`
+- `v_axle_01`, `v_axle_02`
+- `v_suspension_l01/r01/l02/r02`
+- `v_rotator_l01/r01`
+- `v_wheel_l01/r01/l02/r02`
+- `v_door_l01/r01/l02/r02`
+- `v_trunk`
+- `v_steering_wheel`
+- pedal and dashboard bones
 
-### Discover
+Rigid movable parts should have:
 
-Run **Discover** first. It reports:
+- one exact vertex group matching the target bone;
+- all vertices weighted `1.0` to that group;
+- one Armature modifier targeting the vehicle armature;
+- identity local transform after binding.
 
-- Vehicle dimensions.
-- Current polygon count.
-- Possible wheel objects.
-- Possible material assignments.
-- Whether the long vehicle axis appears correct.
+Use **RVC > Check Vehicle** to find broken bindings.
 
-Discover does not intentionally rebuild the vehicle.
+Screenshot: TO BE ADDED
 
-### Auto-Setup
+## Memory Points
 
-Auto-Setup scales and organizes the source model. Review the result immediately. Restore the generated checkpoint if the scale or assignment is wrong.
+Memory points are empties used by slots, seats, actions, lights, and effects.
 
-### Organize
+Common points:
 
-Organize places parts into predictable collections and names them for review.
+- crew idle/get-in points;
+- `snap_glass_<slot>` for glass exports;
+- `snap_light_<slot>` for light exports;
+- wheel, exhaust, light, and interaction markers.
 
-## 6. Parts Tab
+Do not leave required crew or slot points at world origin unless that is intentional.
 
-Use the **Parts** tab before rigging.
+Screenshot: TO BE ADDED
 
-### Quick Select
+## Collision
 
-Click a part name to select every object assigned to that part.
+Main vehicle collision must be simple and convex.
 
-### Review
+Use these tools:
 
-Review isolates or ghosts the rest of the vehicle. Use it to find pieces assigned to the wrong door, interior, or exterior group.
+- **Required Vehicle Collision**: creates main UCX/UBX blocks, wheel mine triggers, and component boxes.
+- **Selected Parts -> UCX Convex**: creates one convex `Vehicle` collider per selected part.
+- **Edit Selection -> UCX**: builds controlled UCX from selected faces.
+- **Selected -> Direct Collision Copy**: creates FireGeo, GlassFire, VehicleComplex, or validated UCX copies.
+- **Fix Layer + Gamemats**: assigns Enfusion layer presets and stock game materials.
+- **Validate UCX Physics**: checks face count, convexity, usage, transforms, and naming.
+- **Convexify Selected UCX**: repairs selected adjusted UCX hulls.
+- **Collision Review View**: isolates `Vehicle`, `FireGeo`, glass, wheels, MineTrigger, or all collision.
 
-### Door Test-Open
+Do not make one full-body UCX hull around a concave vehicle. Use several hulls.
 
-Test-open each door. A correctly assigned door should rotate as one rigid part. If trim or glass stays behind, move it into the correct door group.
+Screenshot: TO BE ADDED
 
-### Finalize
+## Part Fixer > Build
 
-Finalize joins reviewed part groups into their final named objects.
+Use this tab for combined build and repair actions.
 
-Only finalize after the assignments are correct.
+- **Required Vehicle Collision**: creates expected SampleCar-style vehicle collision.
+- **Build FireGeo**: creates body, door, trunk, and component FireGeo.
+- **Auto Tune From Mesh**: adjusts decomposition settings from selected mesh complexity.
+- **Selected Parts -> UCX Convex**: builds capped convex hulls from selected parts.
+- **Edit Selection -> UCX**: builds UCX from selected faces.
+- **Selected -> Direct Collision Copy**: creates direct FireGeo, GlassFire, VehicleComplex, or validated UCX copies.
+- **Validate UCX Physics**: checks convexity, face count, transforms, usage, and naming.
+- **Convexify Selected UCX**: repairs selected UCX hull geometry.
+- **Tidy / Remove Colliders**: removes generated, invalid, or all collision objects depending on mode.
 
-## 7. Rig Tab
+Use one-click build actions as a starting point. Review the result before export.
 
-The rig follows the SampleCar-style Enfusion bone contract.
+Screenshot: TO BE ADDED
 
-1. Place or verify wheel targets.
-2. Build the rig.
-3. Skin parts.
-4. Click individual bones to review them.
-5. Test doors and controls.
+## LOD
 
-Rigid vehicle parts should normally have:
+LOD tools reduce visual triangle count for runtime performance.
 
-- One exact vertex group matching their bone.
-- Every vertex weighted `1.0` to that group.
-- One Armature modifier targeting the vehicle armature.
+Use LOD tools after:
 
-Run **RVC > Check Vehicle** to find broken bindings.
+- part assignment is correct;
+- rig and collision are reviewed;
+- a high-detail source `.blend` has been saved.
 
-## 8. Memory Tab
+Inspect reduced meshes for damaged wheels, doors, glass, lights, and thin trim.
 
-Memory points are invisible positions used by Enfusion.
+Screenshot: TO BE ADDED
 
-Common examples:
+## FireGeo
 
-- Driver and passenger idle positions.
-- Get-in positions.
-- Headlights and emergency lights.
-- Exhaust, steering, and interaction positions.
+Use FireGeo for bullet and damage interaction.
 
-Use the buttons to place initial sockets, then move them manually while viewing the vehicle from several directions.
+Required component colliders:
 
-Do not leave required crew positions at world origin.
+- `UCX_FG_Engine`
+- `UCX_FG_Battery`
+- `UCX_FG_FuelTank`
+- `UCX_FG_Gearbox`
 
-## 9. Collision: The Most Important Beginner Section
+Common detail colliders:
 
-Open **Part Fixer > Exp > Collision Review**.
+- `UTM_FG_Body_*`
+- `UTM_FG_Door_*`
+- `UTM_FG_Interior`
+- `UTM_FG_Light_*`
 
-Use the review buttons:
+FireGeo can follow the visual model more closely than main physics, but it should still be purposeful.
 
-- **Model**: visual model only.
-- **UCX**: vehicle physics and wheel MineTriggers over the model.
-- **FireGeo**: bullet/damage geometry over the model.
-- **All**: every section.
-- **L/R/F/B/Top**: quick orthographic review directions.
-- **Sort + Collapse Enfusion**: repairs Enfusion preset collections and cleans the Outliner view.
+Screenshot: TO BE ADDED
 
-### Why One Big UCX Does Not Work
+## Glass
 
-UCX physics objects must be convex.
+Current workflow: export glass as separate DST slot parts.
 
-A shape is convex when a straight line between any two points inside it never leaves the shape. A vehicle outline with a hood, windshield, roof, turret, and rear step is concave.
+Each glass export should contain:
 
-Therefore, build it from several convex objects:
+- visual mesh named `Glass_<slot>`;
+- collider named `UTM_Glass`;
+- empty named `snap_glass`.
 
-- Lower chassis.
-- Hood/front.
-- Front cabin/windshield.
-- Rear cabin.
-- Turret or roof equipment.
+Source snap empties should be named:
 
-Each object can touch or overlap slightly. Each object must remain convex.
+- `snap_glass_F`
+- `snap_glass_FL`
+- `snap_glass_FR`
+- `snap_glass_RL`
+- `snap_glass_RR`
+- `snap_glass_R`
 
-### Build Perceptive UCX Colliders
+The exported child object uses `snap_glass`; the vehicle slot uses `ChildPivotID "snap_glass"`.
 
-This creates a starting blockout based on the vehicle and rig dimensions. It is not a finished artistic result. Review and adjust the points so the colliders sit slightly inside the visual shell.
+Screenshot: TO BE ADDED
 
-### Selected Parts -> UCX Convex
+## Wheels
 
-This creates one convex collider for each selected separated part.
+Current workflow: export wheels as separate wheel slot parts.
 
-Good selections:
+Each wheel export should contain:
 
-- One door.
-- One bumper.
-- One turret.
-- One detached roof box.
+- wheel visual mesh;
+- `UCL_VC_wheel00` on `VehicleComplex`;
+- wheel FireGeo when needed for tire/rim hit detail.
 
-Bad selections:
+The master vehicle keeps wheel bones and wheel slot definitions. The master does not export visual road wheels.
 
-- The complete exterior.
-- The complete interior.
-- Every object at once.
-- Windows or tiny decorative objects.
+Screenshot: TO BE ADDED
 
-Generated hulls are limited to 200 faces and assigned to the Enfusion `Vehicle` preset.
+## Lights
 
-### Convexify Selected UCX
+Current workflow: export light parts separately like glass.
 
-Use this after manually moving UCX vertices.
+Each light export should contain:
 
-It rebuilds the selected collider faces from the collider's current points while preserving placement, dimensions, presets, and rigid binding. This repairs twisted or non-planar faces.
+- visual mesh named `Light_<slot>`;
+- collider named `UTM_FG_Light_<slot>`;
+- empty named `snap_light`.
 
-### Validate
+Source snap empties should use names such as:
 
-Validate checks:
+- `snap_light_FL`
+- `snap_light_FR`
+- `snap_light_RL`
+- `snap_light_RR`
+- `snap_light_roofbar`
+- `snap_light_grille_L`
 
-- The 200-face limit.
-- True convexity.
-- Enfusion `Vehicle` usage.
-- Correct collection placement.
-- Applied scale.
-- Naming.
-- Required rigid bone bindings.
+Use this for headlights, brake lights, indicators, light covers, and emergency light parts.
 
-Do not export while validation reports errors.
+Screenshot: TO BE ADDED
 
-## 10. FireGeo And Glass
+## RVC Tab
 
-FireGeo controls bullet and damage interaction. It can be more detailed than vehicle physics, but should still be purposeful.
+Use this tab before export.
 
-- Use component boxes for engine, battery, fuel tank, and gearbox.
-- Use body and door FireGeo for weapon hits.
-- Use `UTM_Glass*` for glass bullet interaction.
-- Do not use detailed FireGeo as the main vehicle physics shape.
+- **Check Vehicle**: writes a report and lists blocking issues.
+- **Apply Safe Binding Fixes**: repairs deterministic rigid binding problems after making a checkpoint.
+- **Prepare Canonical SampleCar Rig**: adds missing canonical bones to an existing positioned rig.
+- **Generate UTM_Glass Colliders**: extracts detected glass material faces into glass collision meshes.
+- **Checked Export**: runs checks, then calls the legacy exporter if no blocking errors remain.
+- **Structured FBX Profiles**: exports master, glass, wheels, lights, or all profiles.
+- **Open Build / Import Web Tool**: starts the optional local project setup page.
+- **Export Selected BCR / NMO**: writes selected material texture sources.
 
-## 11. LOD Tab
+Screenshot: TO BE ADDED
 
-LOD tools reduce visual triangle count.
+## Structured FBX Profiles
 
-Always keep an untouched high-detail source file. Inspect reduced meshes for broken wheels, doors, lights, and thin panels.
+Use this for the current split-export workflow.
 
-## 12. RVC Checks And Safe Fixes
+| Button | Output | Contains |
+|---|---|---|
+| **Master** | `<Asset>.fbx` | Body, interior, exterior, skeleton, memory points, main `Vehicle` collision, wheel mine triggers, component FireGeo. |
+| **Glass** | `Dst/<Asset>_Glass_<slot>.fbx` | `Glass_<slot>`, `UTM_Glass`, `snap_glass`. |
+| **Wheels** | `VehParts/<Asset>_Wheel_<slot>.fbx` | Wheel visual, `UCL_VC_wheel00`. |
+| **Lights** | `Lights/<Asset>_Light_<slot>.fbx` | `Light_<slot>`, `UTM_FG_Light_<slot>`, `snap_light`. |
+| **Export All Profiles** | all profile outputs | Full vehicle FBX split. |
 
-Open the **RVC** tab.
+The master profile excludes:
 
-### Check Vehicle
+- slot doors;
+- road wheels;
+- DST glass;
+- DST lights;
+- wheel `VehicleComplex`;
+- non-wheel `UTM_VC_*`.
 
-Creates a JSON report and identifies blocking errors and warnings.
+Screenshot: TO BE ADDED
 
-### Apply Safe Binding Fixes
+## Workbench Import
 
-Creates a checkpoint and repairs deterministic rigid-part binding problems. It verifies that visible object bounds do not move during the repair.
+After exporting:
 
-### Prepare Canonical SampleCar Rig
+1. Refresh Resource Manager.
+2. Import/rebuild the master XOB.
+3. Import/rebuild glass XOBs.
+4. Import/rebuild wheel XOBs.
+5. Import/rebuild light XOBs.
+6. Check `.xob.meta` layer presets and game materials.
+7. Open generated or hand-authored `.et` prefabs.
+8. Confirm glass/light prefabs override the inherited MeshObject component, not add a duplicate MeshObject.
+9. Spawn the runtime vehicle prefab.
 
-Adds missing canonical bones to an existing positioned armature. This is not a replacement for correctly placing the important bones.
+Screenshot: TO BE ADDED
 
-### Generate UTM_Glass Colliders
+## Common Problems
 
-Extracts detected glass-material faces into glass collision objects.
+| Problem | Cause | Fix |
+|---|---|---|
+| Vehicle sinks or creeps | Bad master collision, wheel slots, glass/light duplicate physics, or full-body `VehicleComplex` | Remove bad master `UTM_VC_*`, verify wheel slots, use separate DST glass/light exports. |
+| Duplicate default cube in glass/light prefab | Child added a new MeshObject instead of overriding inherited MeshObject | Use the inherited component ID and point it at the correct XOB. |
+| UCX validates as non-convex | Twisted faces or concave hull | Use **Convexify Selected UCX** or rebuild smaller hulls. |
+| Door does not animate | Bad binding or wrong vertex group | Bind rigidly to the exact door bone. |
+| Glass does not attach correctly | Missing or wrong `snap_glass` | Add `snap_glass_<slot>` in Blender and export glass profile again. |
+| Light prefab attaches wrong | Missing or wrong `snap_light` | Add `snap_light_<slot>` and export light profile again. |
+| Workbench reports wrong GUID | Resource path/GUID mismatch | Refresh/rebuild resource database and update the prefab resource token. |
 
-### Checked Export
+## Runtime Test
 
-Runs the checker first. Export is blocked when errors remain.
+Spawn the runtime vehicle prefab and check:
 
-## 13. Export
+- rests on wheels;
+- no idle creep;
+- no ground sinking;
+- wheels steer/spin;
+- doors animate;
+- glass appears and breaks correctly;
+- lights attach at the correct points;
+- no unresolved resource errors in logs.
 
-Before export:
-
-1. Save the `.blend`.
-2. Run UCX **Validate**.
-3. Run **RVC > Check Vehicle**.
-4. Resolve blocking errors.
-5. Confirm the export directory.
-6. Confirm the required export sections.
-7. Use **Checked Export**.
-
-After export, import through Enfusion Blender Tools and inspect the generated resources in Workbench.
-
-## 14. Common Problems
-
-### The UCX Looks Correct But Validation Says Non-Convex
-
-The points may be correct while one or more faces are twisted or non-planar. Select the collider and use **Convexify Selected UCX**.
-
-### A Door Collider Does Not Move
-
-The collider needs the same rigid vertex group and Armature modifier as the door.
-
-### The Vehicle Bounces Or Catches The Ground
-
-The lower physics collider may extend below the intended chassis floor or overlap wheel contact areas.
-
-### The Collider Covers Empty Space
-
-The source selection was too large or compound. Delete that generated collider and create several smaller convex colliders.
-
-### Everything Is Wireframe And Hard To Read
-
-Use **Collision Review > UCX** or **Model** instead of **All**.
-
-## 15. Screenshots Needed For This Guide
-
-Useful screenshots to add later:
-
-1. Blender Add-ons installation screen.
-2. The Part Fixer Setup tab.
-3. Correctly organized parts in the Outliner.
-4. A door test-open example.
-5. Correct wheel and door bones.
-6. Side, front, and top UCX review examples.
-7. A good multi-block convex vehicle outline.
-8. FireGeo and glass review.
-9. A clean RVC check report.
-10. Enfusion Workbench import settings and final vehicle test.
+Screenshot: TO BE ADDED

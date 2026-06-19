@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.9
+
+- Added RVC Structured FBX Profiles: separate Master Vehicle, DST Glass, Wheel, and Light exports. The master profile excludes slot-owned doors, road wheels, glass, lights, wheel VehicleComplex, and non-wheel `UTM_VC_*` detail collision; glass and light slot exports include `snap_glass`/`snap_light` fallbacks.
+
 ## 0.13.0
 
 - Copy-decimate tool ("Selected -> Direct Collision Copy") now builds VALID convex UCX vehicle colliders: the UCX Vehicle target produces guaranteed-convex, face-capped (<=200), outlier-rejected hulls per selected part (or one merged hull with Merge Selected), instead of a non-convex raw copy. So you can copy interior/exterior/any selection straight into working UCX colliders. FireGeo/GlassFire/VehicleComplex targets keep the exact-shape copy as before.

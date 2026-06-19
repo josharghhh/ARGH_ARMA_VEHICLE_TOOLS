@@ -1,24 +1,30 @@
 # Documentation Screenshots
 
-Add screenshots here using these names:
+Status: TO BE ADDED
+
+Add screenshots with these filenames:
 
 - `01-install-addon.png`
 - `02-part-fixer-setup.png`
 - `03-organized-parts.png`
 - `04-door-test-open.png`
 - `05-rig-review.png`
-- `06-ucx-side.png`
-- `07-ucx-front.png`
-- `08-ucx-top.png`
-- `09-firegeo.png`
-- `10-rvc-report.png`
-- `11-workbench-import.png`
-- `12-runtime-test.png`
+- `06-memory-points.png`
+- `07-ucx-side.png`
+- `08-ucx-front.png`
+- `09-ucx-top.png`
+- `10-firegeo.png`
+- `11-glass-profile-export.png`
+- `12-light-profile-export.png`
+- `13-wheel-profile-export.png`
+- `14-rvc-report.png`
+- `15-workbench-import.png`
+- `16-runtime-test.png`
 
-Recommended screenshot rules:
+Rules:
 
-- Crop to the relevant Blender or Workbench area.
-- Keep object names and the active tool panel visible.
-- Use a neutral example vehicle or remove private project names.
-- Use PNG format.
-- Keep each image below 2 MB where practical.
+- Show the relevant Blender or Workbench panel.
+- Keep object names visible when useful.
+- Crop out unrelated UI.
+- Use PNG.
+- Keep each file below 2 MB where practical.

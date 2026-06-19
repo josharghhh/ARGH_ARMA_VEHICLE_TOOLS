@@ -1,15 +1,33 @@
 # Reforger Vehicle Tools
 
-Blender tools for preparing, checking, and exporting wheeled vehicles for Arma Reforger.
+Blender tools for preparing, validating, and exporting wheeled vehicles for Arma Reforger.
 
-This repository combines two workflows:
+## What The Tools Do
 
-- **Reforger Vehicle Part Fixer**: separates and reviews vehicle parts, builds a SampleCar-style rig, creates and reviews collision geometry, places memory points, prepares LODs, and exports an Enfusion FBX set.
-- **Reforger Vehicle Checker**: validates the vehicle, safely repairs rigid movable-part bindings, checks export readiness, creates glass colliders, packs BCR/NMO texture sources, and provides an optional local setup webpage.
+- **Part Fixer**: organizes imported vehicle meshes into doors, windows, wheels, lights, interior, exterior, and mechanical groups.
+- **Rig tools**: builds and checks a SampleCar-style skeleton, wheel bones, door bones, rotators, suspension, pedals, gauges, and memory points.
+- **Collision tools**: creates and reviews `Vehicle`, `FireGeo`, `MineTrigger`, glass, wheel, and component colliders.
+- **Build tools**: run one-click collision/FireGeo/LOD passes, V-HACD/CoACD workflows, collider cleanup, and UCX repair.
+- **LOD tools**: reduce visual meshes to a target triangle budget while keeping the source file intact.
+- **RVC Checker**: reports blocking rig, binding, prefab, resource, and collision problems before export.
+- **Structured FBX Profiles**: exports the vehicle as separate master, glass, wheel, and light FBX sets.
+- **Texture tools**: packs selected material sources into Enfusion-friendly BCR/NMO texture files.
+- **Workbench source generator**: creates SampleCar-style prefab/config sources through the optional local web tool.
 
-The tools are designed for Blender 4.x and the official Enfusion Blender Tools workflow.
+## Install
 
-## Required References
+1. Download `reforger_vehicle_checker.zip` from `dist/` or the latest release.
+2. Open Blender.
+3. Open **Edit > Preferences > Add-ons**.
+4. Select **Install from Disk**.
+5. Choose `reforger_vehicle_checker.zip`.
+6. Enable **Reforger Vehicle Checker**.
+7. Press `N` in the 3D Viewport.
+8. Use the **Part Fixer** and **RVC** tabs.
+
+Do not unzip the addon before installing it.
+
+## Required Reference
 
 Install the official SampleMod_NewCar reference:
 
@@ -17,72 +35,83 @@ Install the official SampleMod_NewCar reference:
 powershell -ExecutionPolicy Bypass -File scripts/install_official_sample.ps1
 ```
 
-This downloads the current official `SampleMod_NewCar` from Bohemia Interactive's samples repository into the standard Workbench addons folder. See [Dependencies And References](docs/DEPENDENCIES.md).
+See [Dependencies And References](docs/DEPENDENCIES.md).
 
-## Download And Install
+## Standard Workflow
 
-1. Download `reforger_vehicle_checker.zip` from the latest release or the `dist` folder.
-2. Open Blender.
-3. Choose **Edit > Preferences > Add-ons**.
-4. Click the small arrow/menu in the upper-right, then **Install from Disk**.
-5. Select `reforger_vehicle_checker.zip`.
-6. Enable **Reforger Vehicle Checker**.
-7. Open the 3D Viewport and press `N`.
-8. Use the **Part Fixer** and **RVC** tabs.
+1. Save a working copy of the `.blend`.
+2. In **Part Fixer > Setup**, set asset name, export folder, wheelbase, and wheel radius.
+3. Run **Discover**.
+4. Organize and review parts.
+5. Build/review the SampleCar-style rig.
+6. Add memory points and snap points.
+7. Build required vehicle collision.
+8. Review `Vehicle`, `FireGeo`, `MineTrigger`, glass, wheel, and all collision views.
+9. Run **RVC > Check Vehicle**.
+10. Fix blocking errors.
+11. Export with **Structured FBX Profiles**.
+12. Import/rebuild resources in Workbench.
+13. Runtime test the prefab.
 
-Do not unzip the release ZIP before installing it through Blender.
+## Structured Export Profiles
 
-## Start Here
+Use **RVC > Structured FBX Profiles** for current vehicle exports.
 
-Read the [Absolute Beginner Guide](docs/BEGINNER_GUIDE.md) before modifying a vehicle.
+| Button | Output | Use |
+|---|---|---|
+| **Master** | `<Asset>.fbx` | Body/interior/exterior, skeleton, memory points, main `Vehicle` collision, wheel mine triggers, and component FireGeo. |
+| **Glass** | `Dst/<Asset>_Glass_<slot>.fbx` | DST window parts with `Glass_<slot>`, `UTM_Glass`, and `snap_glass`. |
+| **Wheels** | `VehParts/<Asset>_Wheel_<slot>.fbx` | Wheel slot parts with wheel visual and `UCL_VC_wheel00`. |
+| **Lights** | `Lights/<Asset>_Light_<slot>.fbx` | Light slot parts with `Light_<slot>`, `UTM_FG_Light_<slot>`, and `snap_light`. |
+| **Export All Profiles** | all of the above | Full split export. |
 
-To publish this repository and its website, follow [GitHub Publishing](docs/GITHUB_PUBLISHING.md).
+The master export intentionally excludes doors, road wheels, DST glass, DST lights, wheel `VehicleComplex`, and non-wheel `UTM_VC_*`.
 
-The safest first session is:
+## Collision Rules
 
-1. Save the vehicle as a new `.blend`.
-2. In **Part Fixer > Setup**, set the wheelbase and wheel radius.
-3. Run **Discover** and inspect the console report.
-4. Organize and review parts before finalizing.
-5. Build and inspect the rig.
-6. Build collision, then use **Validate**.
-7. Run **RVC > Check Vehicle**.
-8. Export only after blocking errors are resolved.
+- `UCX_MainCol_*` and `UBX_MainCol_*` are main vehicle physics.
+- Main vehicle physics must be simple and individually convex.
+- `UCL_MT_wheel_*` mine triggers belong at the wheel slots.
+- `UCX_FG_Engine`, `UCX_FG_Battery`, `UCX_FG_FuelTank`, and `UCX_FG_Gearbox` are required component FireGeo.
+- `UTM_Glass` belongs in separate DST glass exports.
+- `UCL_VC_wheel00` belongs in wheel part exports.
+- Do not export full body/interior/door meshes as master `VehicleComplex`.
 
-## Important Collision Rule
+See [Collision Reference](docs/COLLISION_REFERENCE.md).
 
-Every `UCX_*` object must be individually convex. A complete vehicle side outline is normally concave, so it must be represented by several overlapping or touching convex blocks.
+## Guides
 
-Use:
-
-- **Build Perceptive UCX Colliders** for a starting blockout.
-- **Selected Parts -> UCX Convex** only on separated parts such as doors or bumpers.
-- **Convexify Selected UCX** after manually adjusting collider points.
-- **Validate** before export.
-
-Never select the complete high-detail exterior and create one UCX hull around it.
-
-## Repository Layout
-
-```text
-addon/reforger_vehicle_checker/  Blender addon source
-docs/                            GitHub Pages site and beginner guide
-dist/                            Built installable ZIP
-scripts/                         Packaging helper
-reference/                       Manifests for separately licensed official references
-```
+- [Tool Usage Guide](docs/BEGINNER_GUIDE.md)
+- [Collision Reference](docs/COLLISION_REFERENCE.md)
+- [Vehicle ET Setup](docs/VEHICLE_ET_SETUP.md)
+- [Dependencies And References](docs/DEPENDENCIES.md)
+- [GitHub Publishing](docs/GITHUB_PUBLISHING.md)
 
 ## Optional Local Setup Wizard
 
-The RVC panel can open a local webpage at `http://127.0.0.1:8765`.
+The RVC panel can open a local web tool at `http://127.0.0.1:8765`.
 
-It requires Python packages from `requirements-wizard.txt`:
+Install optional packages:
 
 ```powershell
 py -3 -m pip install -r requirements-wizard.txt
 ```
 
-The Blender tools work without the optional webpage.
+The Blender addon works without the web tool.
+
+## Repository Layout
+
+```text
+addon/reforger_vehicle_checker/  Blender addon source
+docs/                            guide and GitHub Pages files
+dist/                            installable addon ZIP
+scripts/                         packaging and reference helpers
+reference/                       official-reference manifests
+```
+
+## Screenshots
+
+TO BE ADDED
 
 ## References
 

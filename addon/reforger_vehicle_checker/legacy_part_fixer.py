@@ -81,6 +81,11 @@ DOOR_WINDOW = {"door_FL": "window_FL", "door_FR": "window_FR",
 DOOR_BONE = {"door_FL": "v_door_l01", "door_FR": "v_door_r01",
              "door_RL": "v_door_l02", "door_RR": "v_door_r02",
              "door_trunk": "v_trunk"}
+# Export tag -> door whose bone the glass 'snap_glass' socket binds to. Matches the
+# vehicle base-prefab glass slots (glass_fl PivotID v_door_l01 ... glass_r PivotID v_trunk).
+GLASS_DOOR_SOCKETS = (("FL", "door_FL"), ("FR", "door_FR"),
+                      ("RL", "door_RL"), ("RR", "door_RR"),
+                      ("R", "door_trunk"))
 
 COLL_COLORS = {
     "door_FL": 'COLOR_01', "door_FR": 'COLOR_01', "door_RL": 'COLOR_01', "door_RR": 'COLOR_01',
@@ -375,6 +380,30 @@ def door_hinge(door_name):
     hx = sorted(p.x for p in edge)[len(edge) // 2]
     hz = (min(p.z for p in edge) + max(p.z for p in edge)) / 2
     return Vector((hx, ymax - 0.02, hz))
+
+
+def _bone_world(bone_name):
+    """World position of an armature bone head, or None. Module-level companion to
+    the local bone_w closures used during rig build, usable from export/socket ops."""
+    if not bone_name:
+        return None
+    for arm in bpy.data.objects:
+        if arm.type == 'ARMATURE' and bone_name in arm.data.bones:
+            return arm.matrix_world @ arm.data.bones[bone_name].head_local
+    return None
+
+
+def _glass_socket_loc(door):
+    """Exact world pivot for a door/trunk-glass 'snap_glass' socket.
+
+    The vehicle base prefab binds the glass slot with PivotID = door bone
+    (v_door_xx / v_trunk) and ChildPivotID = 'snap_glass', so the socket MUST sit
+    on that bone for the glass to land correctly and follow the door open/close.
+    Falls back to the geometric door hinge when the model is not rigged yet."""
+    loc = _bone_world(DOOR_BONE.get(door))
+    if loc is not None:
+        return loc.copy()
+    return door_hinge(door)
 
 
 def frame_view(context):
@@ -695,6 +724,39 @@ def _apply_vehicle_collision_materials(obj, armored_body=False):
     return usage, resources
 
 
+def _is_stock_gamemat(resource):
+    """A gamemat reference that Workbench can link to the shipped game library."""
+    return (isinstance(resource, str)
+            and resource.startswith("{")
+            and "Common/Materials/Game/" in resource
+            and resource.endswith(".gamemat"))
+
+
+def _collider_has_valid_gamemats(obj):
+    """True only if EVERY material slot already resolves to a stock gamemat.
+    A bare/local material (e.g. an import's 'metal' -> local material/metal.gamemat)
+    fails so it gets repaired before export."""
+    mats = [m for m in obj.data.materials if m] if obj.type == 'MESH' else []
+    if not mats:
+        return False
+    return all(_is_stock_gamemat(_gamemat_resource_from_material(m)) for m in mats)
+
+
+def _ensure_collider_gamemats(objects, armored_body=False):
+    """Guarantee every collider carries valid STOCK gamemats before export so
+    Workbench never falls back to a local 'material/metal.gamemat' placeholder.
+    Only repairs colliders whose slots are NOT already valid stock gamemats, so
+    deliberate per-face dropdown assignments are preserved."""
+    fixed = []
+    for obj in objects:
+        if obj.type != 'MESH' or not obj.name.startswith(COLLIDER_PFX):
+            continue
+        if not _collider_has_valid_gamemats(obj):
+            _apply_vehicle_collision_materials(obj, armored_body)
+            fixed.append(obj.name)
+    return fixed
+
+
 def _place_ebt_collider(obj, usage=None):
     """Put a collider in the collection structure expected by Enfusion Tools."""
     usage = usage or _collider_usage(obj.name)
@@ -759,6 +821,123 @@ def _remove_glass_faces(obj):
         obj.data.materials.pop(index=index)
     obj.data.update()
     return len(faces)
+
+
+def _make_wheel_vc(name, center, radius, depth=0.28, segs=16):
+    """VehicleComplex tire-contact cylinder (UCL_VC_wheel*) about a world `center`,
+    axis along X (the wheel spin axis). Reproduces the proven SampleCar/Begal
+    UCL_VC_wheel00 — rubber_tire_4mm via the collider-material policy."""
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_cone(bm, cap_ends=True, segments=segs,
+                          radius1=radius, radius2=radius, depth=depth)
+    for v in bm.verts:   # cone along Z -> rotate onto X, then place at the wheel
+        v.co = Vector((v.co.z, v.co.y, -v.co.x)) + center
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(obj)
+    _apply_vehicle_collision_materials(obj)
+    _ensure_mesh_uvs(obj)
+    return obj
+
+
+def _make_wheel_fg(name, center, tire_radius, rim_radius, width=0.26, segs=20):
+    """SampleCar-style wheel FireGeo (UTM_FG_Wheel*) about a world `center`.
+
+    FireGeo is hit/damage geometry (not physics — the VehicleComplex cylinder and
+    the wheel-sim radius own contact), so it must cover the WHOLE tyre to be
+    shootable: an outer full-tire cylinder (material 0 = rubber) plus an inner
+    rim/hub cylinder (material 1 = metal). Two slots -> imported SurfaceProperties
+    [rubber_tire_4mm, metal_5mm]."""
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+
+    def add_cylinder(radius, cylinder_depth, segments, mat_index):
+        result = bmesh.ops.create_cone(
+            bm, cap_ends=True, segments=segments,
+            radius1=radius, radius2=radius, depth=cylinder_depth,
+        )
+        # create_cone only returns 'verts' — derive THIS cylinder's faces from its
+        # own verts (the two cylinders are disjoint), then tag the material slot.
+        new_verts = result["verts"]
+        vset = set(new_verts)
+        for v in new_verts:
+            v.co = Vector((v.co.z, v.co.y, -v.co.x)) + center
+        for face in {f for v in new_verts for f in v.link_faces}:
+            if all(fv in vset for fv in face.verts):
+                face.material_index = mat_index
+
+    add_cylinder(tire_radius, width, segs, 0)                          # outer tyre = rubber
+    add_cylinder(rim_radius, width * 1.15, max(12, segs // 2), 1)      # inner rim/hub = metal
+    bm.to_mesh(me)
+    bm.free()
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(obj)
+    _apply_vehicle_collision_materials(obj)
+    _ensure_mesh_uvs(obj)
+    return obj
+
+
+def _wheel_collider_dims(objs):
+    """World center + tire radius + width for a set of wheel mesh objects.
+    Wheel axis is X, so radius is half the Y/Z extent and width is the X extent."""
+    mn = Vector((1e9, 1e9, 1e9))
+    mx = Vector((-1e9, -1e9, -1e9))
+    for obj in objs:
+        a, b = wbbox(obj)
+        mn.x = min(mn.x, a.x); mn.y = min(mn.y, a.y); mn.z = min(mn.z, a.z)
+        mx.x = max(mx.x, b.x); mx.y = max(mx.y, b.y); mx.z = max(mx.z, b.z)
+    center = (mn + mx) * 0.5
+    radius = max((mx.y - mn.y) * 0.5, (mx.z - mn.z) * 0.5)
+    width = max(mx.x - mn.x, 0.12)
+    return center, radius, width
+
+
+def _sources_world_center(sources):
+    """Vertex-average world center of mesh sources — matches the centering used by
+    _centered_visual_copy(_many) so a pre-built wheel collider can be shifted by the
+    same amount and stay aligned with the centered wheel at export."""
+    pts = []
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    for src in sources:
+        if not src or src.type != 'MESH':
+            continue
+        evaluated = src.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        try:
+            pts.extend(evaluated.matrix_world @ v.co for v in mesh.vertices)
+        finally:
+            evaluated.to_mesh_clear()
+    if not pts:
+        return None
+    return sum(pts, Vector()) / len(pts)
+
+
+def _baked_collider_copy(src, name, center):
+    """Identity-space copy of a collider mesh, shifted so the wheel `center` lands at
+    the origin. Preserves the source's material slots/indices (already valid stock
+    gamemats), so a one-click scene wheel collider ships unchanged in the wheel FBX."""
+    me = src.data.copy()
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(obj)
+    world = src.matrix_world
+    for vert in me.vertices:
+        vert.co = (world @ vert.co) - center
+    obj.matrix_world = Matrix.Identity(4)
+    me.update()
+    return obj
+
+
+def _wheel_tag_for_sources(sources):
+    """FL/FR/RL/RR for a wheel export job, from the source part/object names."""
+    pairs = (("FL", "wheel_FL"), ("FR", "wheel_FR"), ("RL", "wheel_RL"), ("RR", "wheel_RR"))
+    for src in sources:
+        base = part_of(src) or src.name
+        for tag, wname in pairs:
+            if base == wname or base.startswith(wname) or src.name.startswith(wname):
+                return tag
+    return None
 
 
 GLASS_FACE_MAT_TOKENS = (
@@ -1097,7 +1276,7 @@ def _cyl_x(name, center, radius, depth, segs=16):
 
 class RPF_OT_build_colliders(bpy.types.Operator):
     bl_idname = "rpf.build_colliders"
-    bl_label = "Build Perceptive UCX Colliders"
+    bl_label = "Required Vehicle Collision"
     bl_description = ("One click: stock-convention physics colliders measured off the "
                       "rig — a chain of individually convex low-LOD profile blocks for "
                       "chassis, armored rear body, windshield, hood and roof turret "
@@ -1157,19 +1336,23 @@ class RPF_OT_build_colliders(bpy.types.Operator):
         cabin_bottom = max(z_floor + 0.34, H * 0.27)
         turret_front = min(windshield_y - 0.22, cabin_split + 0.95)
         turret_rear = max(rear_tip + 0.65, turret_front - 1.20)
+        rear_lower_end = min(cabin_split - 0.25, y_r + 0.35)
+        center_lower_start = rear_lower_end - 0.10
+        center_lower_end = max(cabin_split + 0.45, y_f - 0.65)
+        front_lower_start = center_lower_end - 0.12
 
         made = []
         made.append(_tapered_prism(
-            "UCX_MainCol_01_LowerChassis",
-            rear_tip, front_tip,
-            (halfw * 0.78, halfw * 0.82, z_floor, lower_top),
-            (halfw * 0.72, halfw * 0.68, z_floor + 0.05, lower_top - 0.08),
+            "UCX_MainCol_01_RearLower",
+            rear_tip, rear_lower_end,
+            (halfw * 0.78, halfw * 0.82, z_floor, lower_top - 0.06),
+            (halfw * 0.84, halfw * 0.86, z_floor, lower_top),
         ).name)
         made.append(_tapered_prism(
             "UCX_MainCol_02_RearCabin",
-            rear_tip + 0.10, cabin_split + 0.12,
-            (halfw * 0.82, halfw * 0.88, cabin_bottom, roof_h - 0.04),
-            (halfw * 0.90, halfw * 0.84, cabin_bottom, roof_h),
+            rear_tip + 0.08, cabin_split - 0.18,
+            (halfw * 0.78, halfw * 0.82, cabin_bottom, H * 0.66),
+            (halfw * 0.84, halfw * 0.82, cabin_bottom + 0.04, H * 0.76),
         ).name)
         made.append(_tapered_prism(
             "UCX_MainCol_03_FrontCabin",
@@ -1188,6 +1371,18 @@ class RPF_OT_build_colliders(bpy.types.Operator):
             turret_rear, turret_front,
             (halfw * 0.54, halfw * 0.58, roof_h, H - 0.04),
             (halfw * 0.54, halfw * 0.58, roof_h, H - 0.04),
+        ).name)
+        made.append(_tapered_prism(
+            "UCX_MainCol_06_CenterLower",
+            center_lower_start, center_lower_end,
+            (halfw * 0.84, halfw * 0.86, z_floor, lower_top),
+            (halfw * 0.78, halfw * 0.80, z_floor + 0.01, lower_top - 0.04),
+        ).name)
+        made.append(_tapered_prism(
+            "UCX_MainCol_07_FrontLower",
+            front_lower_start, front_tip,
+            (halfw * 0.76, halfw * 0.78, z_floor + 0.01, lower_top - 0.04),
+            (halfw * 0.66, halfw * 0.68, z_floor + 0.04, lower_top - 0.10),
         ).name)
 
         mt = {"wheel_FL": "UCL_MT_wheel_L01", "wheel_RL": "UCL_MT_wheel_L02",
@@ -2011,9 +2206,11 @@ class RPF_OT_collision_view(bpy.types.Operator):
             ('FIRE', "FireGeo", "FireGeo and GlassFire with model"),
             ('GLASS', "Glass", "Glass collision with model"),
             ('WHEELS', "All Wheel", "All wheel VehicleComplex, MineTrigger and FireGeo collision with model"),
-            ('WHEEL_VC', "VehicleComplex", "All VehicleComplex collision, including UCL_VC wheel slots and UTM_VC detail copies"),
+            ('BODY_FIRE', "Body FireGeo", "Body/component FireGeo with wheel FireGeo hidden"),
+            ('WHEEL_VC', "Wheel VehicleComplex", "Wheel-part VehicleComplex only"),
             ('WHEEL_FG', "Wheel FireGeo", "Wheel FireGeo tire/rim hit geometry only"),
             ('WHEEL_MT', "MineTrigger", "Wheel mine-trigger collision only"),
+            ('COLLISION', "All Collision", "All collision layers without render meshes"),
             ('ALL', "All", "All render and collision sections"),
         ],
         default='UCX',
@@ -2022,7 +2219,7 @@ class RPF_OT_collision_view(bpy.types.Operator):
     def execute(self, context):
         collider_prefixes = ("UCX_", "UBX_", "UCL_", "UTM_", "USP_", "UCS_")
         wheel_modes = {'WHEELS', 'WHEEL_VC', 'WHEEL_FG', 'WHEEL_MT'}
-        solid_review_modes = {'UCX', 'FIRE', 'GLASS', 'WHEELS', 'WHEEL_VC', 'WHEEL_FG', 'WHEEL_MT', 'ALL'}
+        solid_review_modes = {'UCX', 'FIRE', 'GLASS', 'WHEELS', 'BODY_FIRE', 'WHEEL_VC', 'WHEEL_FG', 'WHEEL_MT', 'COLLISION', 'ALL'}
         for obj in bpy.data.objects:
             if obj.type != 'MESH':
                 continue
@@ -2030,7 +2227,7 @@ class RPF_OT_collision_view(bpy.types.Operator):
             is_collider = obj.name.startswith(collider_prefixes)
             usage = obj.get("usage", "")
             if not is_collider:
-                visible = True
+                visible = self.mode != 'COLLISION'
                 obj.display_type = 'TEXTURED' if self.mode in {'MODEL', 'UCX'} else 'WIRE'
                 obj.show_in_front = False
             elif self.mode == 'MODEL':
@@ -2039,6 +2236,8 @@ class RPF_OT_collision_view(bpy.types.Operator):
                 visible = usage == "Vehicle"
             elif self.mode == 'FIRE':
                 visible = usage in {"FireGeo", "GlassFire"}
+            elif self.mode == 'BODY_FIRE':
+                visible = usage == "FireGeo" and not name.startswith("UTM_FG_Wheel") and "wheel" not in name.lower()
             elif self.mode == 'GLASS':
                 visible = name.startswith(("UTM_Glass", "UTM_GlassFire")) or usage == "GlassFire"
             elif self.mode == 'WHEELS':
@@ -2047,11 +2246,15 @@ class RPF_OT_collision_view(bpy.types.Operator):
                     or (usage in {"MineTrigger", "VehicleComplex"} and "wheel" in name.lower())
                 )
             elif self.mode == 'WHEEL_VC':
-                visible = name.startswith(("UCL_VC_", "UTM_VC_")) or usage == "VehicleComplex"
+                visible = name.startswith("UCL_VC_wheel") or (
+                    usage == "VehicleComplex" and "wheel" in name.lower()
+                )
             elif self.mode == 'WHEEL_FG':
                 visible = name.startswith("UTM_FG_Wheel") or (usage == "FireGeo" and "wheel" in name.lower())
             elif self.mode == 'WHEEL_MT':
                 visible = name.startswith("UCL_MT_wheel") or (usage == "MineTrigger" and "wheel" in name.lower())
+            elif self.mode == 'COLLISION':
+                visible = is_collider
             else:
                 visible = True
             obj.hide_set(not visible)
@@ -2061,7 +2264,7 @@ class RPF_OT_collision_view(bpy.types.Operator):
                 obj.show_in_front = visible
                 obj.color = ENFUSION_LAYER_COLORS.get(usage, obj.color)
                 obj.display_type = 'SOLID' if visible and self.mode in solid_review_modes else 'WIRE'
-                if visible and self.mode in {'FIRE', 'GLASS'} | wheel_modes:
+                if visible and self.mode in {'FIRE', 'GLASS', 'BODY_FIRE', 'COLLISION'} | wheel_modes:
                     obj.show_wire = False
                     obj.show_all_edges = False
         for area in context.screen.areas:
@@ -2072,7 +2275,7 @@ class RPF_OT_collision_view(bpy.types.Operator):
                     continue
                 space.shading.type = 'SOLID'
                 space.shading.color_type = 'OBJECT'
-                space.shading.show_xray = self.mode in {'FIRE', 'GLASS'} | wheel_modes
+                space.shading.show_xray = self.mode in {'FIRE', 'GLASS', 'BODY_FIRE', 'COLLISION'} | wheel_modes
                 space.shading.xray_alpha = 0.35
                 if self.mode in {'FIRE', 'GLASS'} | wheel_modes:
                     space.overlay.show_wireframes = False
@@ -3330,22 +3533,35 @@ import re as _rpf_re
 _WHEEL_BODY_GUARD = ("arch", "well", "house", "fender", "guard", "mudflap",
                      "mud_flap", "flare", "skirt")
 _WHEEL_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:wheel|wheels|tyre|tire)(?:$|[_.\s\d])', _rpf_re.I)
-_GLASS_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:glass|window|windows|windshield|windscreen)(?:$|[_.\s\d])', _rpf_re.I)
-_LIGHT_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:headlight|brakelight|taillight|tail_light|light|lights|lamp|indicator|blinker)(?:$|[_.\s\d])', _rpf_re.I)
+_GLASS_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:glass|window|windows|windshield|windscreen|reflectorglass|chromereflector)(?:$|[_.\s\d])', _rpf_re.I)
+# Lights cover stock car lamps AND emergency/police lights (lightbar, foglight,
+# spotlight, dome, siren, strobe, beacon, pursuit, flasher) and modeller-LED parts.
+_LIGHT_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:headlight|brakelight|taillight|tail_light|light|lights|lamp|lamps|indicator|blinker|reverselight|foglight|spotlight|spot|lightbar|dome|domelight|siren|strobe|flasher|beacon|pursuit|bulb|led|leds|reflector)(?:$|[_.\s\d])', _rpf_re.I)
 _DOOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:door|doors)(?:$|[_.\s\d])', _rpf_re.I)
 _HOOD_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:hood|bonnet)(?:$|[_.\s\d])', _rpf_re.I)
 _TRUNK_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:trunk|boot|hatch|tailgate|decklid)(?:$|[_.\s\d])', _rpf_re.I)
 _REAR_AREA_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:tray|bed|cargo|load|rearbody|tub)(?:$|[_.\s\d])', _rpf_re.I)
-_INTERIOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:interior|inside|seat|seats|dash|dashboard|console|pedal|steering|wheelhouse|carpet|fabric)(?:$|[_.\s\d])', _rpf_re.I)
-_MECH_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:engine|motor|battery|fuel|tank|gearbox|transmission|diff|differential|exhaust|suspension|axle|driveshaft|chassis|undercarriage|underbody)(?:$|[_.\s\d])', _rpf_re.I)
-_BRAKE_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:brake|caliper|disc|rotor)(?:$|[_.\s\d])', _rpf_re.I)
+_INTERIOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:interior|inside|seat|seats|dash|dashboard|console|consol|pedal|steering|wheelhouse|carpet|fabric|cluster|gauge|airbag|armrest|cabin|cockpit|trim)(?:$|[_.\s\d])', _rpf_re.I)
+_MECH_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:engine|motor|battery|fuel|tank|gearbox|transmission|diff|differential|exhaust|suspension|axle|driveshaft|chassis|undercarriage|underbody|frame|subframe|oilpan|radiator|intake|manifold|header|muffler|catalytic)(?:$|[_.\s\d])', _rpf_re.I)
+_BRAKE_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:brake|brakes|caliper|disc|disk|rotor|brakecaliper|brakedisc|brakedisk|brakerotor)(?:$|[_.\s\d])', _rpf_re.I)
+# Wheel parts modellers often split into Tire/Rim/RimCap/Hubcap/Hub — all belong
+# to the wheel slot and must group with Tire001-004 etc.
+_WHEEL_NAME_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:tire|tires|tyre|tyres|rim|rims|rimcap|rimcaps|hubcap|hubcaps|hub|wheel|wheels)(?:$|[_.\s\d])', _rpf_re.I)
+# Auxiliary exterior-body tokens that shouldn't fall to bbox ambiguity.
+_EXTERIOR_RE = _rpf_re.compile(r'(?:^|[_.\s])(?:body|bodywork|fender|grille|grill|guard|bumper|mirror|wiper|wiperarm|wiperblade|antenna|badge|emblem|logo|sidestep|step|runningboard|skirt|spoiler|roof|roofrack|bullbar|pushbar|antennae)(?:$|[_.\s\d])', _rpf_re.I)
 
 
 def _is_wheel_part(name):
     low = name.lower()
     if any(g in low for g in _WHEEL_BODY_GUARD):
         return False  # wheel arch / fender / mudguard are BODY, not the tire
-    return is_road_wheel_name(name)
+    if is_steering_name(name):
+        return False  # SteeringWheel matches 'wheel' token but is interior
+    if is_road_wheel_name(name):
+        return True
+    # CamelCase fallback for Rim001 / RimCap003 / Tire004 / HubCap001 patterns
+    # that the canonical name list misses.
+    return bool(_WHEEL_NAME_RE.search("_" + _split_camel(name).lower() + "_"))
 
 
 def _is_glass_part(name):
@@ -3356,10 +3572,32 @@ def _is_light_part(name):
     return bool(_LIGHT_RE.search("_" + name + "_"))
 
 
+_CAMEL_BOUNDARY_RE = _rpf_re.compile(r'(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])')
+
+
+def _split_camel(text):
+    """Insert spaces at CamelCase / letter-digit boundaries so token regexes match
+    fused 3D-modeller names like 'BrakeCaliper001' -> 'Brake Caliper 001',
+    'FogLight LED' -> 'Fog Light LED', 'RimCap003' -> 'Rim Cap 003'."""
+    if not text:
+        return text
+    return _CAMEL_BOUNDARY_RE.sub(" ", text)
+
+
 def _object_semantic_text(obj):
+    """Token-source for classifier regexes. Includes the object name, its
+    collection names, and material names — each in BOTH raw and CamelCase-split
+    forms — joined and lowercased. The split form is what lets a regex token
+    like 'caliper' match 'BrakeCaliper001'."""
     bits = [obj.name]
-    bits.extend(collection.name for collection in obj.users_collection)
-    bits.extend(slot.material.name for slot in obj.material_slots if slot.material)
+    bits.append(_split_camel(obj.name))
+    for collection in obj.users_collection:
+        bits.append(collection.name)
+        bits.append(_split_camel(collection.name))
+    for slot in obj.material_slots:
+        if slot.material:
+            bits.append(slot.material.name)
+            bits.append(_split_camel(slot.material.name))
     return " ".join(bits).lower()
 
 
@@ -3456,23 +3694,27 @@ def _classify_vehicle_object(obj, mn, mx):
     a, b = wbbox(obj)
     center = (a + b) * 0.5
     existing = _semantic_from_existing_part(part_of(obj), center, mn, mx)
+    # ORDER MATTERS: explicit slot-class tokens (door/trunk/hood/wheel/light)
+    # win over body or material-derived classes. Lights are checked BEFORE
+    # glass and brake because a brake-light lens has both glass-material and
+    # 'brake' token but is a LIGHT cover, not a brake disc / windshield.
     if existing:
         result = existing
     elif _is_wheel_part(text):
         result = {"category": "wheel", "group": _wheel_or_brake_group("wheel", center, mn, mx), "role": "wheel-slot"}
-    elif _BRAKE_RE.search("_" + text + "_"):
-        result = {"category": "brake", "group": _wheel_or_brake_group("brake", center, mn, mx), "role": "firegeo"}
-    elif _is_glass_part(text) or _material_family(text) == "glass":
-        result = {"category": "glass", "group": "glass", "role": "dst-glass"}
-    elif _is_light_part(text):
-        group = "lights_front" if center.y >= (mn.y + mx.y) * 0.5 else "lights_rear"
-        result = {"category": "light_cover", "group": group, "role": "firegeo"}
     elif _DOOR_RE.search("_" + text + "_"):
         result = {"category": "door", "group": _door_group(center, mn, mx, text), "role": "vehicle"}
     elif _HOOD_RE.search("_" + text + "_"):
         result = {"category": "hood", "group": "hood", "role": "vehicle"}
     elif _TRUNK_RE.search("_" + text + "_"):
         result = {"category": "trunk", "group": "door_trunk", "role": "vehicle"}
+    elif _is_light_part(text):
+        group = "lights_front" if center.y >= (mn.y + mx.y) * 0.5 else "lights_rear"
+        result = {"category": "light_cover", "group": group, "role": "firegeo"}
+    elif _is_glass_part(text) or _material_family(text) == "glass":
+        result = {"category": "glass", "group": "glass", "role": "dst-glass"}
+    elif _BRAKE_RE.search("_" + text + "_"):
+        result = {"category": "brake", "group": _wheel_or_brake_group("brake", center, mn, mx), "role": "firegeo"}
     elif _REAR_AREA_RE.search("_" + text + "_"):
         result = {"category": "rear_area", "group": "rear_area", "role": "vehicle"}
     elif _MECH_RE.search("_" + text + "_"):
@@ -3480,6 +3722,13 @@ def _classify_vehicle_object(obj, mn, mx):
         result = {"category": "mechanical", "group": group, "role": "firegeo"}
     elif _INTERIOR_RE.search("_" + text + "_"):
         result = {"category": "interior", "group": "interior", "role": "firegeo"}
+    elif _EXTERIOR_RE.search("_" + text + "_"):
+        # Explicit exterior-body token (body/grille/bumper/mirror/wiper/badge/
+        # antenna/sidestep/...) — always an exterior part. Use the simple
+        # 'exterior' group; never sub-divide into cab/rear_area by bbox here,
+        # since these tokens are unambiguously body and the bbox heuristic only
+        # exists to triage UNLABELED meshes.
+        result = {"category": "exterior", "group": "exterior", "role": "vehicle"}
     else:
         y_span = max(mx.y - mn.y, 1e-6)
         z_span = max(mx.z - mn.z, 1e-6)
@@ -4183,6 +4432,64 @@ def _collision_for_part(part, index, decimate_target, threshold, max_hulls, max_
     return made, index
 
 
+class RPF_OT_build_wheel_colliders(bpy.types.Operator):
+    bl_idname = "rpf.build_wheel_colliders"
+    bl_label = "Wheel Colliders (1-click)"
+    bl_description = ("One click: build the proven SampleCar/Begal wheel collider pair on "
+                      "each wheel — UCL_VC_wheel_* (VehicleComplex rubber tire contact) + "
+                      "UTM_FG_Wheel_* (FireGeo rim+tire). Sized and placed from the wheel "
+                      "mesh. Acts on selected wheels if any are selected, else all four. "
+                      "Wheel colliders are kept OUT of the body XOB and shipped centered in "
+                      "each wheel prefab at export")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    replace_existing: bpy.props.BoolProperty(
+        name="Replace existing",
+        default=True,
+        description="Delete any existing UCL_VC_wheel_*/UTM_FG_Wheel_* for a wheel before rebuilding",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' and _is_wheel_part(o.name) for o in context.scene.objects)
+
+    def execute(self, context):
+        tags = (("FL", "wheel_FL"), ("FR", "wheel_FR"),
+                ("RL", "wheel_RL"), ("RR", "wheel_RR"))
+        selected = [o for o in context.selected_objects
+                    if o.type == 'MESH' and _is_wheel_part(o.name)]
+        sel_parts = {part_of(o) or o.name for o in selected}
+        made = []
+        for tag, wname in tags:
+            objs = [o for o in (part_objects(wname) or []) if o.type == 'MESH']
+            if not objs:
+                # tolerate finalize/join duplicate names (wheel_RR.wheel_RR) and
+                # wheels living outside a matching part collection.
+                objs = [o for o in bpy.data.objects
+                        if o.type == 'MESH'
+                        and (o.name == wname or o.name.startswith(wname + ".")
+                             or part_of(o) == wname)]
+            if not objs:
+                continue
+            if selected and wname not in sel_parts and not any(o in selected for o in objs):
+                continue
+            center, radius, width = _wheel_collider_dims(objs)
+            if self.replace_existing:
+                for nm in (f"UCL_VC_wheel_{tag}", f"UTM_FG_Wheel_{tag}"):
+                    existing = bpy.data.objects.get(nm)
+                    if existing:
+                        bpy.data.objects.remove(existing, do_unlink=True)
+            vc = _make_wheel_vc(f"UCL_VC_wheel_{tag}", center, radius * 0.98, depth=width * 0.95)
+            fg = _make_wheel_fg(f"UTM_FG_Wheel_{tag}", center, radius * 0.96, radius * 0.46,
+                                width=max(width * 0.9, 0.12))
+            made += [vc.name, fg.name]
+        if not made:
+            self.report({'ERROR'}, "no wheel meshes found - need wheel_FL/FR/RL/RR (or select wheels)")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"built {len(made) // 2} wheel collider set(s): {', '.join(made)}")
+        return {'FINISHED'}
+
+
 class RPF_OT_vhacd_selected(bpy.types.Operator):
     bl_idname = "rpf.vhacd_selected"
     bl_label = "V-HACD -> Multi-Hull UCX"
@@ -4642,6 +4949,12 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
             # Collision / FireGeo classes are routed by their prefix FIRST, so a
             # collider that happens to be named like a wheel/glass still classifies
             # correctly instead of being dropped as a slot visual.
+            # Wheel VehicleComplex/FireGeo belong to the WHEEL prefab. Wheel
+            # MineTrigger cylinders belong to the master body XOB.
+            if name.startswith(("UCL_VC_wheel", "UTM_FG_Wheel")):
+                return False
+            if name.startswith("UTM_VC_"):
+                return False
             if name.startswith("UTM_Glass"):
                 return context.scene.rpf_export_glass_firegeo
             if name.startswith(("UTM_FG_", "UCX_FG_")):
@@ -4673,6 +4986,13 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
 
         # ---- 1) master: selected render/skeleton/memory/collision classes.
         body = [o for o in context.scene.objects if include_master(o)]
+        # Guarantee every body collider ships valid STOCK gamemats so Workbench
+        # never invents a local 'material/metal.gamemat' (the wrong-GUID flood).
+        # Only repairs colliders not already on a stock gamemat.
+        gm_fixed = _ensure_collider_gamemats(body, context.scene.rpf_collider_setup_armored)
+        if gm_fixed:
+            print(f"ENFUSION EXPORT: applied stock gamemats to {len(gm_fixed)} collider(s): "
+                  + ", ".join(gm_fixed[:12]) + (" ..." if len(gm_fixed) > 12 else ""))
         restore_master_materials = _temporary_master_material_overrides(body)
         try:
             done.append(_fbx_export(os.path.join(EXPORT_ROOT, f"{ASSET_NAME}.fbx"), body))
@@ -4685,7 +5005,14 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
         #      one valid wheel FireGeo collider with both surface properties.
         def _wheel_source(name):
             obj = bpy.data.objects.get(name)
-            return obj if obj and obj.type == 'MESH' else None
+            if obj and obj.type == 'MESH':
+                return obj
+            # tolerate finalize/join duplicate names (wheel_RR.wheel_RR) + part collections
+            for candidate in bpy.data.objects:
+                if candidate.type == 'MESH' and (
+                        candidate.name.startswith(name + ".") or part_of(candidate) == name):
+                    return candidate
+            return None
 
         def _first_wheel(names):
             for name in names:
@@ -4721,44 +5048,7 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
             return [("Wheel", [single])] if single else []
 
         if context.scene.rpf_export_wheel_slot:
-            def _cyl(name, radius, depth, segs):
-                me = bpy.data.meshes.new(name)
-                bm = _bm.new()
-                _bm.ops.create_cone(bm, cap_ends=True, segments=segs,
-                                    radius1=radius, radius2=radius, depth=depth)
-                for v in bm.verts:   # cylinder along Z -> rotate onto X (wheel axis)
-                    v.co = Vector((v.co.z, v.co.y, -v.co.x))
-                bm.to_mesh(me); bm.free()
-                o = bpy.data.objects.new(name, me)
-                bpy.context.scene.collection.objects.link(o)
-                return o
-
-            def _wheel_firegeo(name, tire_radius, rim_radius, depth, segs):
-                me = bpy.data.meshes.new(name)
-                bm = _bm.new()
-
-                def add_cylinder(radius, cylinder_depth, segments, mat_index):
-                    result = _bm.ops.create_cone(
-                        bm, cap_ends=True, segments=segments,
-                        radius1=radius, radius2=radius, depth=cylinder_depth,
-                    )
-                    for v in result.get("verts", []):
-                        v.co = Vector((v.co.z, v.co.y, -v.co.x))
-                    faces = result.get("faces")
-                    if faces is None:
-                        faces = [g for g in result.get("geom", []) if isinstance(g, _bm.types.BMFace)]
-                    for face in faces:
-                        face.material_index = mat_index
-
-                add_cylinder(tire_radius, depth, segs, 0)
-                add_cylinder(rim_radius, depth * 1.12, max(12, segs // 2), 1)
-                bm.to_mesh(me); bm.free()
-                obj = bpy.data.objects.new(name, me)
-                bpy.context.scene.collection.objects.link(obj)
-                _apply_vehicle_collision_materials(obj)
-                _ensure_mesh_uvs(obj)
-                return obj
-
+            ZERO = Vector((0.0, 0.0, 0.0))
             radius = context.scene.rpf_wheel_radius
             jobs = _wheel_export_jobs()
             if not jobs:
@@ -4768,11 +5058,22 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
                 w = _centered_visual_copy_many(sources, "wheel")
                 if not w:
                     continue
-                ucl = _cyl("UCL_VC_wheel00", radius * 0.98, 0.28, 16)  # rubber VehicleComplex
-                _apply_vehicle_collision_materials(ucl)
-                _ensure_mesh_uvs(ucl)
-                fg = _wheel_firegeo("UTM_FG_Wheel_L01", radius, radius * 0.48, 0.30, 24)
                 _ensure_mesh_uvs(w)
+                # Ship one-click scene colliders (UCL_VC_wheel_<tag>/UTM_FG_Wheel_<tag>)
+                # centered with the wheel when present; otherwise generate the proven
+                # SampleCar pair at origin from the wheel radius.
+                center = _sources_world_center(sources) or ZERO
+                tag = _wheel_tag_for_sources(sources)
+                prebuilt_vc = bpy.data.objects.get(f"UCL_VC_wheel_{tag}") if tag else None
+                prebuilt_fg = bpy.data.objects.get(f"UTM_FG_Wheel_{tag}") if tag else None
+                if prebuilt_vc:
+                    ucl = _baked_collider_copy(prebuilt_vc, "UCL_VC_wheel00", center)
+                else:
+                    ucl = _make_wheel_vc("UCL_VC_wheel00", ZERO, radius * 0.98)  # rubber VehicleComplex
+                if prebuilt_fg:
+                    fg = _baked_collider_copy(prebuilt_fg, "UTM_FG_Wheel_L01", center)
+                else:
+                    fg = _make_wheel_fg("UTM_FG_Wheel_L01", ZERO, radius * 0.96, radius * 0.46)
                 suffix = "" if slot == "Wheel" else f"_{slot}"
                 paths = [os.path.join(EXPORT_ROOT, "VehParts", f"{ASSET_NAME}_Wheel{suffix}.fbx")]
                 if slot == "Front":
@@ -4909,12 +5210,26 @@ class RPF_OT_export_enfusion(bpy.types.Operator):
             _apply_vehicle_collision_materials(collision)
             _ensure_mesh_uvs(collision)
             extras = [g, collision]
-            hinge = door_hinge(door) if door else None
-            if hinge:
+            snap_loc = None
+            if door:
+                placed = bpy.data.objects.get(f"snap_glass_{tag}")
+                if placed and placed.type == 'EMPTY':
+                    snap_loc = placed.matrix_world.translation.copy()
+                else:
+                    snap_loc = _glass_socket_loc(door)
+            if snap_loc is not None:
+                # Center the export origin on the socket: shift the glass mesh and its
+                # collider so the snap point lands at (0,0,0). With ChildPivotID
+                # 'snap_glass' the engine re-aligns this origin to the door bone
+                # (PivotID v_door_xx), so the imported glass sits exactly where
+                # authored AND rides the door as it opens/closes.
+                shift = Matrix.Translation(-snap_loc)
+                g.matrix_world = shift @ g.matrix_world
+                collision.matrix_world = shift @ collision.matrix_world
                 snap = bpy.data.objects.new("snap_glass", None)
                 snap.empty_display_type = 'PLAIN_AXES'
                 snap.empty_display_size = 0.1
-                snap.location = hinge
+                snap.location = (0.0, 0.0, 0.0)
                 bpy.context.scene.collection.objects.link(snap)
                 extras.append(snap)
             done.append(_fbx_export(os.path.join(EXPORT_ROOT, "Dst", f"{ASSET_NAME}_Glass_{tag}.fbx"), extras))
@@ -6347,6 +6662,178 @@ class RPF_OT_add_sockets(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RPF_OT_add_glass_sockets(bpy.types.Operator):
+    bl_idname = "rpf.add_glass_sockets"
+    bl_label = "Add Door Glass Sockets"
+    bl_description = ("Place snap_glass_FL/FR/RL/RR (+ R trunk) memory points on the "
+                      "door pivots. Exported door glass is centered on these and binds "
+                      "in-game via PivotID v_door_xx + ChildPivotID snap_glass, so the "
+                      "glass follows the door when it opens. Sits exactly on the door "
+                      "bone if rigged, else the geometric hinge — nudge as needed")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    which: bpy.props.EnumProperty(
+        name="Doors",
+        default='ALL',
+        items=[
+            ('ALL', "Front + Rear + Trunk", "All door/trunk glass sockets"),
+            ('FRONT', "Front only", "snap_glass_FL / snap_glass_FR"),
+            ('REAR', "Rear + Trunk", "snap_glass_RL / RR / R"),
+        ],
+    )
+
+    def execute(self, context):
+        front = {"FL", "FR"}
+        rear = {"RL", "RR", "R"}
+        made, skipped = [], []
+        for tag, door in GLASS_DOOR_SOCKETS:
+            if self.which == 'FRONT' and tag not in front:
+                continue
+            if self.which == 'REAR' and tag not in rear:
+                continue
+            loc = _glass_socket_loc(door)
+            if loc is None:
+                skipped.append(tag)
+                continue
+            made.append(_socket(f"snap_glass_{tag}", loc).name)
+        if not made:
+            self.report({'ERROR'}, "no door bones or door meshes found to anchor glass sockets")
+            return {'CANCELLED'}
+        msg = f"{len(made)} glass socket(s): {', '.join(made)}"
+        if skipped:
+            msg += f" — no anchor for {', '.join(skipped)}"
+        self.report({'INFO'}, msg + " — review/nudge, then export DST glass")
+        return {'FINISHED'}
+
+
+def _rigid_skin_to_bone(obj, arm, bone):
+    """Bind a mesh rigidly (weight 1.0) to a single armature bone: one vertex
+    group, one Armature modifier, object-parented to the armature. Matches how a
+    working door panel/window rides its door bone."""
+    for vg in list(obj.vertex_groups):
+        obj.vertex_groups.remove(vg)
+    vg = obj.vertex_groups.new(name=bone)
+    vg.add(range(len(obj.data.vertices)), 1.0, 'REPLACE')
+    amods = [m for m in obj.modifiers if m.type == 'ARMATURE']
+    if not amods:
+        amods = [obj.modifiers.new("Armature", 'ARMATURE')]
+    for mod in amods:
+        mod.object = arm
+    world = obj.matrix_world.copy()
+    obj.parent = arm
+    obj.parent_type = 'OBJECT'
+    obj.parent_bone = ""
+    obj.matrix_parent_inverse = arm.matrix_world.inverted()
+    obj.matrix_world = world
+
+
+def _bone_parent_keep_world(obj, arm, bone):
+    """Object-to-bone parent that preserves world transform (for the separate
+    glass collider so it rides the door bone without being skinned)."""
+    world = obj.matrix_world.copy()
+    obj.parent = arm
+    obj.parent_type = 'BONE'
+    obj.parent_bone = bone
+    obj.matrix_world = world
+
+
+def _door_glass_colliders(tag):
+    """Glass colliders belonging to a door window (UTM_GlassFire/UTM_Glass)."""
+    out = []
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not obj.name.startswith(("UTM_GlassFire", "UTM_Glass")):
+            continue
+        n = obj.name
+        if f"_door_{tag}_" in n or n.endswith(f"_door_{tag}_window") or n.endswith(f"_{tag}_window"):
+            out.append(obj)
+    return out
+
+
+class RPF_OT_bind_door_glass(bpy.types.Operator):
+    bl_idname = "rpf.bind_door_glass"
+    bl_label = "Bind Door Glass to Doors"
+    bl_description = ("Make door window glass ride its door: skin the window mesh rigidly "
+                      "to the door bone (v_door_xx), bone-parent the separate glass collider "
+                      "(UTM_GlassFire/Glass) to the same bone, drop a snap_glass_<tag> socket "
+                      "at the door hinge, and set the window origin onto that socket. Front, "
+                      "rear, or all doors. Mirrors how a correctly-bound door window already works")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    which: bpy.props.EnumProperty(
+        name="Doors",
+        default='ALL',
+        items=[('ALL', "Front + Rear", "All four door windows"),
+               ('FRONT', "Front only", "FL + FR"),
+               ('REAR', "Rear only", "RL + RR")],
+    )
+
+    def execute(self, context):
+        arm = _get_armature()
+        if not arm or not arm.data.bones:
+            self.report({'ERROR'}, "no vehicle armature - run Build Bones first")
+            return {'CANCELLED'}
+        front = {"FL", "FR"}
+        rear = {"RL", "RR"}
+        doors = (("FL", "door_FL"), ("FR", "door_FR"), ("RL", "door_RL"), ("RR", "door_RR"))
+        done, skipped = [], []
+        for tag, door in doors:
+            if self.which == 'FRONT' and tag not in front:
+                continue
+            if self.which == 'REAR' and tag not in rear:
+                continue
+            bone = DOOR_BONE.get(door)
+            head = _bone_world(bone)
+            if not bone or head is None:
+                skipped.append(tag)
+                continue
+            # window meshes: door_<tag>_window object, window_<tag> collection, or prefix
+            wins = [o for o in (part_objects(f"window_{tag}") or []) if o.type == 'MESH']
+            extra = bpy.data.objects.get(f"door_{tag}_window")
+            if extra and extra.type == 'MESH' and extra not in wins:
+                wins.append(extra)
+            if not wins:
+                wins = [o for o in bpy.data.objects
+                        if o.type == 'MESH'
+                        and (o.name.startswith(f"door_{tag}_window") or o.name.startswith(f"window_{tag}"))
+                        and not o.name.startswith(COLLIDER_PFX)]
+            # 1) skin window mesh -> door bone, into window_<tag>
+            target_coll = get_coll(f"window_{tag}")
+            for win in wins:
+                _rigid_skin_to_bone(win, arm, bone)
+                for c in list(win.users_collection):
+                    c.objects.unlink(win)
+                target_coll.objects.link(win)
+            # 2) bone-parent the separate glass collider(s)
+            for col in _door_glass_colliders(tag):
+                _bone_parent_keep_world(col, arm, bone)
+            # 3) snap_glass socket at the door hinge
+            socket = _socket(f"snap_glass_{tag}", head)
+            # 4) window origin -> socket (keep geometry; safe for skinned mesh)
+            if wins:
+                context.scene.cursor.location = head
+                for o in list(context.selected_objects):
+                    o.select_set(False)
+                for win in wins:
+                    win.select_set(True)
+                context.view_layer.objects.active = wins[0]
+                try:
+                    bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
+                except RuntimeError:
+                    pass
+                context.scene.cursor.location = (0.0, 0.0, 0.0)
+                done.append(tag)
+            else:
+                skipped.append(f"{tag}(no window mesh)")
+        if not done:
+            self.report({'ERROR'}, "no door window meshes found (door_<tag>_window / window_<tag>)")
+            return {'CANCELLED'}
+        msg = f"bound door glass: {', '.join(done)}"
+        if skipped:
+            msg += f" — skipped {', '.join(skipped)}"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 class RPF_OT_mirror_memory_points(bpy.types.Operator):
     bl_idname = "rpf.mirror_memory_points"
     bl_label = "Mirror Memory Points"
@@ -6713,17 +7200,18 @@ class RPF_OT_bake_lod(bpy.types.Operator):
 
 COLLISION_REVIEW_MODES = (
     ('MODEL', "Model"),
-    ('UCX', "UCX"),
-    ('FIRE', "FireGeo"),
+    ('UCX', "Vehicle"),
+    ('BODY_FIRE', "Body FireGeo"),
     ('GLASS', "Glass"),
-    ('WHEELS', "All Wheel"),
+    ('COLLISION', "All Collision"),
     ('ALL', "All"),
 )
 
 WHEEL_REVIEW_MODES = (
-    ('WHEEL_VC', "VehicleComplex"),
-    ('WHEEL_FG', "Wheel FireGeo"),
     ('WHEEL_MT', "MineTrigger"),
+    ('WHEEL_VC', "Wheel VC"),
+    ('WHEEL_FG', "Wheel FireGeo"),
+    ('WHEELS', "All Wheel"),
 )
 
 
@@ -6896,6 +7384,18 @@ class RPF_PT_panel(bpy.types.Panel):
 
         elif tab == 'MEMORY':
             l.operator("rpf.add_sockets", icon='EMPTY_AXIS')
+            gbox = l.box()
+            gbox.label(text="Door Glass Sockets (snap_glass)", icon='MOD_LATTICE')
+            grow = gbox.row(align=True)
+            grow.operator("rpf.add_glass_sockets", text="Front+Rear").which = 'ALL'
+            grow.operator("rpf.add_glass_sockets", text="Front").which = 'FRONT'
+            grow.operator("rpf.add_glass_sockets", text="Rear").which = 'REAR'
+            gbox.label(text="Binds glass to the door bone so it follows the door open.", icon='INFO')
+            brow = gbox.row(align=True)
+            brow.operator("rpf.bind_door_glass", text="Bind All").which = 'ALL'
+            brow.operator("rpf.bind_door_glass", text="Front").which = 'FRONT'
+            brow.operator("rpf.bind_door_glass", text="Rear").which = 'REAR'
+            gbox.label(text="Bind = skin window to door bone + socket + origin + collider parent.", icon='INFO')
             box = l.box()
             box.label(text="Mirror Memory Points", icon='MOD_MIRROR')
             row = box.row(align=True)
@@ -6926,8 +7426,10 @@ class RPF_PT_panel(bpy.types.Panel):
             sockets = sorted(o.name for o in coll.objects) if coll else []
             groups = [("Lights", [n for n in sockets if n.startswith("v_light") and "_em_" not in n]),
                       ("EM Lights", [n for n in sockets if "_em_" in n]),
+                      ("Glass", [n for n in sockets if n.startswith("snap_glass")]),
                       ("Crew", [n for n in sockets if "get" in n.lower() or "idle" in n]),
                       ("Other", [n for n in sockets if not n.startswith("v_light")
+                                 and not n.startswith("snap_glass")
                                  and "get" not in n.lower() and "idle" not in n])]
             for title, names in groups:
                 if not names:
@@ -6993,6 +7495,10 @@ class RPF_PT_panel(bpy.types.Panel):
             cbox = _draw_accordion(l, sc, "rpf_ui_build_ucx", "Collision (UCX)", 'MESH_CUBE')
             if cbox:
                 cbox.operator("rpf.build_colliders", icon='MESH_CUBE')
+                guide = cbox.box()
+                guide.label(text="Master: UCX/UBX_MainCol Vehicle, UCL_MT_wheel MineTrigger, UCX_FG component boxes.", icon='INFO')
+                guide.label(text="Wheel part: UCL_VC_wheel00 VehicleComplex plus UTM_FG_Wheel rubber/metal FireGeo.", icon='INFO')
+                guide.label(text="Do not export full body/interior UTM_VC on the master vehicle.", icon='ERROR')
                 crow = cbox.row(align=True)
                 op = crow.operator("rpf.selected_parts_to_ucx", icon='MESH_ICOSPHERE')
                 op.replace_generated = sc.rpf_ucx_replace_existing
@@ -7008,6 +7514,9 @@ class RPF_PT_panel(bpy.types.Panel):
                 row.prop(sc, "rpf_selected_faces_split_loose", text="Split islands")
                 cbox.prop(sc, "rpf_ucx_replace_existing", text="Replace existing generated UCX")
                 cbox.operator("rpf.convexify_selected_ucx", icon='MESH_ICOSPHERE')
+                wrow = cbox.row(align=True)
+                wrow.operator("rpf.build_wheel_colliders", icon='MESH_CYLINDER')
+                cbox.label(text="Wheels: UCL_VC (VehicleComplex) + UTM_FG (FireGeo) per wheel.", icon='INFO')
 
             mbox = _draw_accordion(l, sc, "rpf_ui_build_materials", "Collider Materials", 'MATERIAL')
             if mbox:
@@ -7084,10 +7593,11 @@ class RPF_PT_panel(bpy.types.Panel):
                 op.mode = 'GLASSFIRE'
                 op.decimate_ratio = sc.rpf_direct_copy_ratio
                 op.merge_selected = sc.rpf_direct_copy_merge
-                op = row.operator("rpf.selected_to_direct_collision", text="UTM VehicleComplex Detail", icon='DUPLICATE')
+                op = row.operator("rpf.selected_to_direct_collision", text="Advanced UTM VC", icon='DUPLICATE')
                 op.mode = 'VEHICLECOMPLEX'
                 op.decimate_ratio = sc.rpf_direct_copy_ratio
                 op.merge_selected = sc.rpf_direct_copy_merge
+                gbox.label(text="Advanced UTM VC is excluded from master export; use wheel-slot UCL_VC for contact.", icon='ERROR')
                 gbox.operator("rpf.separate_wheels", icon='MESH_CIRCLE')
 
         elif tab == 'EXPORT':
@@ -7141,7 +7651,8 @@ CLASSES = (RPF_OT_discover, RPF_OT_build_colliders, RPF_OT_build_firegeo,
            RPF_OT_convexify_selected_ucx,
            RPF_OT_analyze_vehicle_parts, RPF_OT_select_semantic_group,
            RPF_OT_selected_to_direct_collision,
-           RPF_OT_separate_wheels, RPF_OT_vhacd_selected, RPF_OT_install_vhacd_deps,
+           RPF_OT_separate_wheels, RPF_OT_build_wheel_colliders,
+           RPF_OT_vhacd_selected, RPF_OT_install_vhacd_deps,
            RPF_OT_find_vhacd_exe,
            RPF_OT_cleanup_colliders, RPF_OT_fix_ucx, RPF_OT_build_all_physics,
            RPF_OT_collision_view, RPF_OT_view_axis, RPF_OT_sort_collapse,
@@ -7160,7 +7671,8 @@ CLASSES = (RPF_OT_discover, RPF_OT_build_colliders, RPF_OT_build_firegeo,
            RPF_OT_skin_parts, RPF_OT_select_bone, RPF_OT_pose_reset,
            RPF_OT_recenter, RPF_OT_wheel_targets, RPF_OT_apply_wheel_targets,
            RPF_OT_clear_wheel_targets,
-           RPF_OT_add_sockets, RPF_OT_mirror_memory_points,
+           RPF_OT_add_sockets, RPF_OT_add_glass_sockets, RPF_OT_bind_door_glass,
+           RPF_OT_mirror_memory_points,
            RPF_OT_add_socket_cursor, RPF_OT_add_bench_seats, RPF_OT_select_socket,
            RPF_OT_scan_lights,
            RPF_OT_bake_lod,
@@ -7372,15 +7884,20 @@ def register():
         name="Grouped collision categories",
         default="exterior,cab,rear_area,hood,undercarriage,door_FL,door_FR,door_RL,door_RR,door_trunk",
         description="Comma-separated part/category names decomposed by 1-click V-HACD/CoACD")
+    # Blender 4.x: EnumProperty cannot combine a dynamic items callback with a
+    # default= value (silently aborts the rest of register()). Use the static
+    # tuples directly; the lists are fixed at module import so we don't need a
+    # callback. Without this fix, every Scene prop registered after this point
+    # (rpf_wheel_radius, rpf_direct_copy_*, rpf_wheelbase ...) disappears.
     bpy.types.Scene.rpf_collider_setup_layer = bpy.props.EnumProperty(
         name="Layer preset",
         default='FireGeo',
-        items=_collider_layer_items,
+        items=COLLIDER_LAYER_PRESET_ITEMS,
         description="Enfusion collision layer preset to write to selected colliders")
     bpy.types.Scene.rpf_collider_setup_gamemat = bpy.props.EnumProperty(
         name="Game material",
         default='NO_CHANGE',
-        items=_collider_gamemat_items,
+        items=tuple((key, label, desc) for key, label, desc, _r in COLLIDER_GAMEMAT_PRESETS),
         description="Stock Enfusion gamemat assigned to selected colliders or selected UTM faces")
     bpy.types.Scene.rpf_collider_setup_sort = bpy.props.BoolProperty(
         name="Sort into collections",

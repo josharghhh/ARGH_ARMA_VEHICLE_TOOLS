@@ -8,7 +8,7 @@ rig preparation, export blocking, and the localhost setup wizard.
 bl_info = {
     "name": "Reforger Vehicle Checker",
     "author": "ARGH Vehicle Tools contributors",
-    "version": (0, 13, 0),
+    "version": (0, 13, 9),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > RVC",
     "description": "Prepare, validate, repair, and export Enfusion vehicles",
@@ -28,6 +28,13 @@ import bpy
 from mathutils import Vector
 
 from . import legacy_part_fixer, texture_packer
+from .rvc_core.export_profiles import (
+    clean_token,
+    classify_object_name,
+    include_in_profile,
+    profile_filename,
+    slot_from_name,
+)
 
 
 CANONICAL_SAMPLE_FBX = str(
@@ -398,6 +405,271 @@ class RVC_OT_generate_glass_colliders(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _rvc_object_collections(obj):
+    return tuple(collection.name for collection in obj.users_collection)
+
+
+def _rvc_scene_asset_name(context):
+    return clean_token(getattr(context.scene, "rpf_asset_name", "") or "Vehicle")
+
+
+def _rvc_scene_export_root(context):
+    root = getattr(context.scene, "rpf_export_root", "") or "//RVC_Exports"
+    return bpy.path.abspath(root)
+
+
+def _rvc_profile_dir(context, profile):
+    root = _rvc_scene_export_root(context)
+    if profile == "glass":
+        return os.path.join(root, "Dst")
+    if profile == "wheel":
+        return os.path.join(root, "VehParts")
+    if profile == "light":
+        return os.path.join(root, "Lights")
+    return root
+
+
+def _rvc_world_bbox_center(obj):
+    points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return sum(points, Vector()) / len(points) if points else obj.matrix_world.translation.copy()
+
+
+def _rvc_export_selection(path, objects):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    export_objects = []
+    for obj in objects:
+        if obj and obj.name in bpy.data.objects and obj not in export_objects:
+            export_objects.append(obj)
+    for obj in list(export_objects):
+        if obj.type != "MESH":
+            continue
+        for modifier in obj.modifiers:
+            if modifier.type == "ARMATURE" and modifier.object and modifier.object not in export_objects:
+                export_objects.append(modifier.object)
+    if not export_objects:
+        raise ValueError(f"nothing to export to {path}")
+
+    view_layer = bpy.context.view_layer
+    selected_before = [obj for obj in view_layer.objects if obj.select_get()]
+    active_before = view_layer.objects.active
+    hidden = {obj: (obj.hide_get(), obj.hide_viewport, obj.hide_select) for obj in export_objects}
+    for obj in view_layer.objects:
+        try:
+            obj.select_set(False)
+        except RuntimeError:
+            pass
+    for obj in export_objects:
+        obj.hide_set(False)
+        obj.hide_viewport = False
+        obj.hide_select = False
+        obj.select_set(True)
+    view_layer.objects.active = export_objects[0]
+    try:
+        bpy.ops.export_scene.fbx(
+            filepath=path,
+            use_selection=True,
+            object_types={"MESH", "ARMATURE", "EMPTY"},
+            add_leaf_bones=False,
+            use_custom_props=True,
+            mesh_smooth_type="FACE",
+            use_mesh_modifiers=True,
+            use_armature_deform_only=False,
+            primary_bone_axis="Y",
+            secondary_bone_axis="X",
+            axis_forward="-Z",
+            axis_up="Y",
+            bake_anim=False,
+            bake_anim_use_all_actions=False,
+            bake_anim_use_nla_strips=False,
+        )
+    finally:
+        for obj in view_layer.objects:
+            try:
+                obj.select_set(False)
+            except RuntimeError:
+                pass
+        for obj in selected_before:
+            if obj.name in bpy.data.objects:
+                try:
+                    obj.select_set(True)
+                except RuntimeError:
+                    pass
+        if active_before and active_before.name in bpy.data.objects:
+            view_layer.objects.active = active_before
+        for obj, (hidden_get, hidden_viewport, hidden_select) in hidden.items():
+            if obj.name in bpy.data.objects:
+                obj.hide_set(hidden_get)
+                obj.hide_viewport = hidden_viewport
+                obj.hide_select = hidden_select
+    return path
+
+
+def _rvc_temp_collection():
+    collection = bpy.data.collections.get("_RVC_PROFILE_EXPORT_TEMP")
+    if collection is None:
+        collection = bpy.data.collections.new("_RVC_PROFILE_EXPORT_TEMP")
+        bpy.context.scene.collection.children.link(collection)
+    return collection
+
+
+def _rvc_clear_temp_collection():
+    collection = bpy.data.collections.get("_RVC_PROFILE_EXPORT_TEMP")
+    if not collection:
+        return
+    for obj in list(collection.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
+def _rvc_duplicate_mesh(source, name, collection):
+    duplicate = source.copy()
+    duplicate.data = source.data.copy()
+    duplicate.animation_data_clear()
+    duplicate.name = name
+    duplicate.data.name = f"{name}_Mesh"
+    collection.objects.link(duplicate)
+    duplicate.matrix_world = source.matrix_world.copy()
+    return duplicate
+
+
+def _rvc_slot_snap_location(slot, source, snap_prefix):
+    for name in (f"{snap_prefix}_{slot}", snap_prefix):
+        marker = bpy.data.objects.get(name)
+        if marker:
+            return marker.matrix_world.translation.copy()
+    return _rvc_world_bbox_center(source)
+
+
+def _rvc_make_snap(name, location, collection):
+    empty = bpy.data.objects.new(name, None)
+    empty.empty_display_type = "PLAIN_AXES"
+    empty.empty_display_size = 0.08
+    empty.location = location
+    collection.objects.link(empty)
+    return empty
+
+
+def _rvc_sources_for_profile(profile):
+    sources = []
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH":
+            continue
+        role = classify_object_name(obj.name, _rvc_object_collections(obj))
+        if role == profile:
+            sources.append(obj)
+    return sorted(sources, key=lambda item: item.name.casefold())
+
+
+def _rvc_master_objects(context):
+    objects = []
+    for obj in context.scene.objects:
+        if obj.name.startswith("_RVC_PROFILE_EXPORT_TEMP"):
+            continue
+        if obj.type == "MESH":
+            if include_in_profile("master", obj.name, _rvc_object_collections(obj)):
+                objects.append(obj)
+        elif obj.type == "ARMATURE" and context.scene.rvc_profile_export_armature:
+            objects.append(obj)
+        elif obj.type == "EMPTY" and context.scene.rvc_profile_export_memory:
+            objects.append(obj)
+    return objects
+
+
+def _rvc_export_master_profile(context):
+    asset = _rvc_scene_asset_name(context)
+    path = os.path.join(_rvc_profile_dir(context, "master"), profile_filename(asset, "master"))
+    return [_rvc_export_selection(path, _rvc_master_objects(context))]
+
+
+def _rvc_export_slot_profile(context, profile):
+    asset = _rvc_scene_asset_name(context)
+    sources = _rvc_sources_for_profile(profile)
+    if not sources:
+        raise ValueError(f"no {profile} source meshes detected")
+
+    exported = []
+    used_slots = {}
+    for source in sources:
+        slot = slot_from_name(source.name)
+        count = used_slots.get(slot, 0) + 1
+        used_slots[slot] = count
+        export_slot = slot if count == 1 else f"{slot}_{count:02d}"
+        collection = _rvc_temp_collection()
+        _rvc_clear_temp_collection()
+
+        if profile == "glass":
+            visual = _rvc_duplicate_mesh(source, f"Glass_{export_slot}", collection)
+            collider = _rvc_duplicate_mesh(source, "UTM_Glass", collection)
+            snap = _rvc_make_snap(
+                "snap_glass",
+                _rvc_slot_snap_location(slot, source, "snap_glass"),
+                collection,
+            )
+            export_objects = [visual, collider, snap]
+        elif profile == "light":
+            visual = _rvc_duplicate_mesh(source, f"Light_{export_slot}", collection)
+            collider = _rvc_duplicate_mesh(source, f"UTM_FG_Light_{export_slot}", collection)
+            snap = _rvc_make_snap(
+                "snap_light",
+                _rvc_slot_snap_location(slot, source, "snap_light"),
+                collection,
+            )
+            export_objects = [visual, collider, snap]
+        else:
+            visual = _rvc_duplicate_mesh(source, f"Wheel_{export_slot}", collection)
+            collider = _rvc_duplicate_mesh(source, "UCL_VC_wheel00", collection)
+            export_objects = [visual, collider]
+
+        path = os.path.join(
+            _rvc_profile_dir(context, profile),
+            profile_filename(asset, profile, export_slot),
+        )
+        exported.append(_rvc_export_selection(path, export_objects))
+        _rvc_clear_temp_collection()
+    return exported
+
+
+class RVC_OT_export_profile(bpy.types.Operator):
+    bl_idname = "rvc.export_profile"
+    bl_label = "Export Vehicle Profile"
+    bl_description = "Export one structured vehicle FBX profile: master, DST glass, wheels, or lights"
+    bl_options = {"REGISTER"}
+
+    profile: bpy.props.EnumProperty(
+        name="Profile",
+        default="master",
+        items=[
+            ("master", "Master Vehicle", "Body/skeleton/memory/collision only; no doors, wheels, glass, or lights"),
+            ("glass", "DST Glass", "One FBX per glass object with UTM_Glass and snap_glass"),
+            ("wheel", "Wheels", "One FBX per wheel object with UCL_VC_wheel00"),
+            ("light", "Lights", "One FBX per light object with UTM_FG_Light_* and snap_light"),
+            ("all", "All Profiles", "Export master, glass, wheels, and lights"),
+        ],
+    )
+
+    def execute(self, context):
+        try:
+            if self.profile == "all":
+                exported = []
+                exported.extend(_rvc_export_master_profile(context))
+                for profile in ("glass", "wheel", "light"):
+                    try:
+                        exported.extend(_rvc_export_slot_profile(context, profile))
+                    except ValueError as exc:
+                        print(f"RVC_PROFILE_EXPORT skipped {profile}: {exc}")
+            elif self.profile == "master":
+                exported = _rvc_export_master_profile(context)
+            else:
+                exported = _rvc_export_slot_profile(context, self.profile)
+        except Exception as exc:
+            _rvc_clear_temp_collection()
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        for path in exported:
+            print("RVC_PROFILE_EXPORT", path)
+        self.report({"INFO"}, f"exported {len(exported)} FBX file(s)")
+        return {"FINISHED"}
+
+
 class RVC_OT_open_setup_wizard(bpy.types.Operator):
     bl_idname = "rvc.open_setup_wizard"
     bl_label = "Open Build / Import Web Tool"
@@ -469,6 +741,23 @@ class RVC_PT_panel(bpy.types.Panel):
         layout.operator("rvc.prepare_rig", icon="ARMATURE_DATA")
         layout.operator("rvc.generate_glass_colliders", icon="MOD_PHYSICS")
         layout.operator("rvc.export_vehicle", icon="EXPORT")
+        box = layout.box()
+        box.label(text="Structured FBX Profiles", icon="EXPORT")
+        row = box.row(align=True)
+        op = row.operator("rvc.export_profile", text="Master")
+        op.profile = "master"
+        op = row.operator("rvc.export_profile", text="Glass")
+        op.profile = "glass"
+        row = box.row(align=True)
+        op = row.operator("rvc.export_profile", text="Wheels")
+        op.profile = "wheel"
+        op = row.operator("rvc.export_profile", text="Lights")
+        op.profile = "light"
+        op = box.operator("rvc.export_profile", text="Export All Profiles", icon="EXPORT")
+        op.profile = "all"
+        row = box.row(align=True)
+        row.prop(context.scene, "rvc_profile_export_armature", toggle=True)
+        row.prop(context.scene, "rvc_profile_export_memory", toggle=True)
         layout.operator("rvc.open_setup_wizard", icon="URL")
         box = layout.box()
         box.label(text="Enfusion BCR / NMO", icon="TEXTURE")
@@ -495,6 +784,7 @@ CLASSES = (
     RVC_OT_prepare_rig,
     RVC_OT_generate_glass_colliders,
     RVC_OT_export_vehicle,
+    RVC_OT_export_profile,
     RVC_OT_open_setup_wizard,
     RVC_OT_pack_bcr_nmo_textures,
     RVC_PT_panel,
@@ -544,6 +834,16 @@ def register():
         description="Invert the normal green channel for Enfusion",
         default=True,
     )
+    bpy.types.Scene.rvc_profile_export_armature = bpy.props.BoolProperty(
+        name="Armature",
+        description="Include armatures in the master vehicle profile export",
+        default=True,
+    )
+    bpy.types.Scene.rvc_profile_export_memory = bpy.props.BoolProperty(
+        name="Memory",
+        description="Include empties/memory points in the master vehicle profile export",
+        default=True,
+    )
 
 
 def unregister():
@@ -552,6 +852,7 @@ def unregister():
         "rvc_texture_use_vehicle_data", "rvc_texture_export_dir",
         "rvc_texture_file_format", "rvc_texture_fallback_size",
         "rvc_texture_pack_bcr", "rvc_texture_pack_nmo", "rvc_texture_directx_normal",
+        "rvc_profile_export_armature", "rvc_profile_export_memory",
     ):
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)

@@ -55,6 +55,22 @@ GEOMETRY_PARAM_RE = re.compile(
     r"(?P<body>.*?)(?=    GeometryParam |\n   \})",
     re.DOTALL,
 )
+REQUIRED_MASTER_COLLIDERS = (
+    "UCL_MT_wheel_L01",
+    "UCL_MT_wheel_R01",
+    "UCL_MT_wheel_L02",
+    "UCL_MT_wheel_R02",
+    "UCX_FG_Engine",
+    "UCX_FG_Battery",
+    "UCX_FG_FuelTank",
+    "UCX_FG_Gearbox",
+)
+WHEEL_SLOT_CONTRACT = {
+    "Wheel_L01": ("v_wheel_l01", "0", False),
+    "Wheel_R01": ("v_wheel_r01", "1", True),
+    "Wheel_L02": ("v_wheel_l02", "2", False),
+    "Wheel_R02": ("v_wheel_r02", "3", True),
+}
 
 
 def _name_has(name: str, hints: tuple[str, ...]) -> bool:
@@ -83,7 +99,7 @@ def expected_vehicle_layer_preset(name: str) -> str | None:
         return "VehicleComplex"
     if name.startswith("UTM_VC_"):
         return "VehicleComplex"
-    if name.startswith("UCX_MainCol_"):
+    if name.startswith(("UCX_MainCol_", "UBX_MainCol_")):
         return "Vehicle"
     if name.startswith("UCX_FG_"):
         return "FireGeo"
@@ -100,12 +116,14 @@ def vehicle_layer_preset_issues(text: str) -> list[tuple[str, str | None, str]]:
     """List missing or incorrect vehicle collider layer presets."""
     issues: list[tuple[str, str | None, str]] = []
     for match in GEOMETRY_PARAM_RE.finditer(text):
-        name = match.group("name")
+        name = match.group("name").strip('"')
         expected = expected_vehicle_layer_preset(name)
         if not expected:
             continue
         preset_match = re.search(r'^\s*LayerPreset "([^"]+)"', match.group("body"), re.MULTILINE)
         actual = preset_match.group(1) if preset_match else None
+        if name.startswith("UTM_VC_") and actual == "FireGeo":
+            continue
         if actual != expected:
             issues.append((name, actual, expected))
     return issues
@@ -122,7 +140,7 @@ def repair_vehicle_layer_presets(path: str | Path) -> list[tuple[str, str | None
     expected_by_name = {name: expected for name, _actual, expected in issues}
 
     def repair(match: re.Match[str]) -> str:
-        name = match.group("name")
+        name = match.group("name").strip('"')
         expected = expected_by_name.get(name)
         if not expected:
             return match.group(0)
@@ -151,7 +169,7 @@ def expected_vehicle_surface_properties(name: str, armored_body: bool = False) -
         return [TIRE_RUBBER_4MM]
     if name.startswith("UTM_VC_"):
         return inferred_vehicle_detail_surface(name, WHEEL_METAL)
-    if name.startswith("UCX_MainCol_"):
+    if name.startswith(("UCX_MainCol_", "UBX_MainCol_")):
         return [VEHICLE_METAL]
     if name.startswith("UTM_FG_Wheel") and _name_has(name, ("tire", "tyre", "rubber")):
         return [TIRE_RUBBER_4MM]
@@ -180,8 +198,14 @@ def vehicle_surface_property_issues(
     """List collider surface-property blocks missing required SampleCar gamemats."""
     issues: list[tuple[str, list[str], list[str]]] = []
     for match in GEOMETRY_PARAM_RE.finditer(text):
-        name = match.group("name")
+        name = match.group("name").strip('"')
         expected = expected_vehicle_surface_properties(name, armored_body)
+        preset_match = re.search(r'^\s*LayerPreset "([^"]+)"', match.group("body"), re.MULTILINE)
+        if name.startswith("UTM_VC_") and preset_match and preset_match.group(1) == "FireGeo":
+            expected = inferred_vehicle_detail_surface(
+                name,
+                ARMORED_METAL if armored_body else FIREGEO_METAL,
+            )
         if not expected:
             continue
         surface_match = re.search(
@@ -195,6 +219,73 @@ def vehicle_surface_property_issues(
     return issues
 
 
+def forbidden_master_vehiclecomplex_issues(text: str) -> list[str]:
+    """Return master-body detail meshes incorrectly exported as VehicleComplex.
+
+    VehicleComplex is expected on the separate wheel part as ``UCL_VC_wheel00``.
+    Master-body render copies named ``UTM_VC_*`` are too easy to turn into full
+    body/interior contact collision, which causes sinking, dragging and unstable
+    spawn behavior on wheeled vehicles.
+    """
+    issues: list[str] = []
+    for match in GEOMETRY_PARAM_RE.finditer(text):
+        name = match.group("name").strip('"')
+        if not name.startswith("UTM_VC_") or "wheel" in name.lower():
+            continue
+        preset_match = re.search(r'^\s*LayerPreset "([^"]+)"', match.group("body"), re.MULTILINE)
+        if preset_match and preset_match.group(1) == "VehicleComplex":
+            issues.append(name)
+    return issues
+
+
+def required_master_collider_issues(text: str) -> list[str]:
+    """Return required SampleCar-style master vehicle colliders missing from meta."""
+    present = {
+        match.group("name").strip('"')
+        for match in GEOMETRY_PARAM_RE.finditer(text)
+    }
+    return [name for name in REQUIRED_MASTER_COLLIDERS if name not in present]
+
+
+def wheel_slot_contract_issues(text: str) -> list[str]:
+    """Validate generated wheel slots against the SampleCar-style runtime contract."""
+    masked = re.sub(
+        r'"[^"]*"',
+        lambda match: match.group(0).replace("{", "(").replace("}", ")"),
+        text,
+    )
+    slots = {
+        match.group("name"): match.group("body")
+        for match in re.finditer(
+            r"SCR_WheelSlotInfo\s+(?P<name>Wheel_[LR]\d{2})\s*\{(?P<body>[^{}]*)\}",
+            masked,
+            re.DOTALL,
+        )
+    }
+    issues: list[str] = []
+    for slot, (pivot, index, mirrored) in WHEEL_SLOT_CONTRACT.items():
+        body = slots.get(slot)
+        if body is None:
+            issues.append(f"{slot}: missing wheel slot")
+            continue
+        if f'PivotID "{pivot}"' not in body:
+            issues.append(f"{slot}: missing PivotID {pivot}")
+        if "MergePhysics 1" not in body:
+            issues.append(f"{slot}: missing MergePhysics 1")
+        if "DisablePhysicsInteraction 1" not in body:
+            issues.append(f"{slot}: missing DisablePhysicsInteraction 1")
+        if "RegisterDamage 1" not in body:
+            issues.append(f"{slot}: missing RegisterDamage 1")
+        if not re.search(rf"\bm_iWheelIndex\s+{re.escape(index)}\b", body):
+            issues.append(f"{slot}: missing m_iWheelIndex {index}")
+        has_mirror = "Angles 0 180 0" in body
+        if mirrored and not has_mirror:
+            issues.append(f"{slot}: missing right-side Angles 0 180 0")
+        if not mirrored and has_mirror:
+            issues.append(f"{slot}: left-side slot should not be mirrored")
+    return issues
+
+
 def repair_vehicle_surface_properties(
     path: str | Path, armored_body: bool = False
 ) -> list[str]:
@@ -204,8 +295,14 @@ def repair_vehicle_surface_properties(
     changed: list[str] = []
 
     def repair(match: re.Match[str]) -> str:
-        name = match.group("name")
+        name = match.group("name").strip('"')
         expected = expected_vehicle_surface_properties(name, armored_body)
+        preset_match = re.search(r'^\s*LayerPreset "([^"]+)"', match.group("body"), re.MULTILINE)
+        if name.startswith("UTM_VC_") and preset_match and preset_match.group(1) == "FireGeo":
+            expected = inferred_vehicle_detail_surface(
+                name,
+                ARMORED_METAL if armored_body else FIREGEO_METAL,
+            )
         if not expected:
             return match.group(0)
         body = match.group("body")
@@ -355,6 +452,28 @@ def check_project(project: VehicleProject) -> CheckReport:
                 "Apply safe metadata fixes, then rebuild the XOB in Workbench.",
             )
         report.facts["collider_layer_preset_issues"] = layer_issues
+        forbidden_vc = forbidden_master_vehiclecomplex_issues(text)
+        if forbidden_vc:
+            report.add(
+                "meta.master_vehiclecomplex",
+                "error",
+                "Master XOB contains non-wheel UTM_VC_* on VehicleComplex: "
+                + ", ".join(forbidden_vc[:12]),
+                True,
+                "Convert these master-body copies to FireGeo or remove them before rebuilding the XOB.",
+            )
+        report.facts["forbidden_master_vehiclecomplex"] = forbidden_vc
+        missing_colliders = required_master_collider_issues(text)
+        if missing_colliders:
+            report.add(
+                "meta.required_vehicle_colliders",
+                "error",
+                "Master XOB is missing required vehicle colliders: "
+                + ", ".join(missing_colliders),
+                False,
+                "Run Required Vehicle Collision in Blender, export the master FBX, then rebuild the XOB.",
+            )
+        report.facts["missing_required_vehicle_colliders"] = missing_colliders
         surface_issues = vehicle_surface_property_issues(text)
         if surface_issues:
             evidence = ", ".join(
@@ -389,6 +508,16 @@ def check_project(project: VehicleProject) -> CheckReport:
         if duplicate_slots:
             report.add("prefab.slots.unique", "error",
                        "Duplicate slot names: " + ", ".join(duplicate_slots))
+        slot_issues = wheel_slot_contract_issues(text)
+        if slot_issues:
+            report.add(
+                "prefab.wheel_slots",
+                "error",
+                "Wheel slot contract is incomplete: " + "; ".join(slot_issues[:12]),
+                True,
+                "Regenerate the base prefab or copy the SampleCar-style wheel slot fields.",
+            )
+        report.facts["wheel_slot_contract_issues"] = slot_issues
     registered_sources = [base, child]
     registered_sources.extend(sorted((output / "workspaces").glob("*.aw")))
     registered_sources.extend(sorted((output / "workspaces").glob("*.asi")))

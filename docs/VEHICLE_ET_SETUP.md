@@ -10,6 +10,11 @@ generator emit a *full* vehicle instead of a 4-component stub.
 > (mesh/collider/LOD prep) and `VEHICLE_RIGGING_USECASE.md` (skeleton/bones). This doc is the
 > **prefab + simulation** layer that comes *after* a rigged, exported XOB.
 
+> Current Begal working reference: `{C9E60F0144C71751}Prefabs/Vehicles/Wheeled/SampleCar_01/testbase.et`.
+> Treat this as the live known-good Begal test case. Its COM and wheeled simulation tuning should
+> stay aligned with `Prefabs/Vehicles/Wheeled/RVC_VEHICLES/Begal_Base.et`; glass/DST slots may be
+> adjusted separately.
+
 ---
 
 ## 1. Inheritance chain (critical)
